@@ -1,0 +1,188 @@
+/**
+ * src/models/bookingModel.js
+ * Data access for bookings and the message log.
+ */
+
+const { query } = require('../config/db');
+
+const VALID_DIRECTIONS = ['inbound', 'outbound'];
+
+// ---------------------------------------------------------------------------
+// Error helpers
+// Errors carry an HTTP-style `status` that server.js's error handler reads.
+// ---------------------------------------------------------------------------
+const createError = (message, status = 500, cause) => {
+  const err = new Error(message);
+  err.status = status;
+  if (cause) err.cause = cause;
+  return err;
+};
+
+// Turn common PostgreSQL error codes into meaningful errors.
+const handleDbError = (operation, err) => {
+  switch (err.code) {
+    case '22P02': // invalid_text_representation (e.g. malformed UUID)
+      return createError(`${operation}: invalid identifier format`, 400, err);
+    case '22007': // invalid_datetime_format
+    case '22008': // datetime_field_overflow
+      return createError(`${operation}: invalid date/time value`, 400, err);
+    case '23503': // foreign_key_violation
+      return createError(`${operation}: referenced record does not exist`, 404, err);
+    case '23514': // check_violation
+      return createError(`${operation}: value violates a constraint`, 400, err);
+    default:
+      return createError(`${operation}: database error`, 500, err);
+  }
+};
+
+const requireString = (value, field) => {
+  if (typeof value !== 'string' || value.trim() === '') {
+    throw createError(`${field} is required and must be a non-empty string`, 400);
+  }
+};
+
+// ---------------------------------------------------------------------------
+// createBooking
+// clientData: { clientPhone, clientName, serviceType, pickupAddress, scheduledTime, externalId? }
+// Returns the created booking row.
+// With externalId: returns null if this business already has a booking with that
+// externalId (duplicate request). The unique index makes this safe under concurrency.
+// ---------------------------------------------------------------------------
+const createBooking = async (businessId, clientData = {}) => {
+  requireString(businessId, 'businessId');
+  requireString(clientData.clientPhone, 'clientData.clientPhone');
+
+  const sql = `
+    INSERT INTO bookings
+      (business_id, client_phone, client_name, service_type, pickup_address, scheduled_time, external_id)
+    VALUES ($1, $2, $3, $4, $5, $6, $7)
+    ON CONFLICT (business_id, external_id) DO NOTHING
+    RETURNING *
+  `;
+  const params = [
+    businessId,
+    clientData.clientPhone.trim(),
+    clientData.clientName ?? null,
+    clientData.serviceType ?? null,
+    clientData.pickupAddress ?? null,
+    clientData.scheduledTime ?? null,
+    clientData.externalId ?? null,
+  ];
+
+  try {
+    const { rows } = await query(sql, params);
+    return rows[0] || null;
+  } catch (err) {
+    throw handleDbError('createBooking', err);
+  }
+};
+
+// ---------------------------------------------------------------------------
+// findBookingByExternalId
+// Returns the booking row, or null if none exists.
+// ---------------------------------------------------------------------------
+const findBookingByExternalId = async (businessId, externalId) => {
+  requireString(businessId, 'businessId');
+  requireString(externalId, 'externalId');
+
+  try {
+    const { rows } = await query(
+      'SELECT * FROM bookings WHERE business_id = $1 AND external_id = $2',
+      [businessId, externalId]
+    );
+    return rows[0] || null;
+  } catch (err) {
+    throw handleDbError('findBookingByExternalId', err);
+  }
+};
+
+// ---------------------------------------------------------------------------
+// getLatestBookingForClient
+// Pass businessId in multi-tenant use: the same phone number can be a customer
+// of several businesses. Leaving it out searches every tenant.
+// Returns the booking row, or null if none exists.
+// ---------------------------------------------------------------------------
+const getLatestBookingForClient = async (clientPhone, businessId = null) => {
+  requireString(clientPhone, 'clientPhone');
+
+  const sql = businessId
+    ? `SELECT * FROM bookings
+       WHERE client_phone = $1 AND business_id = $2
+       ORDER BY created_at DESC
+       LIMIT 1`
+    : `SELECT * FROM bookings
+       WHERE client_phone = $1
+       ORDER BY created_at DESC
+       LIMIT 1`;
+  const params = businessId ? [clientPhone.trim(), businessId] : [clientPhone.trim()];
+
+  try {
+    const { rows } = await query(sql, params);
+    return rows[0] || null;
+  } catch (err) {
+    throw handleDbError('getLatestBookingForClient', err);
+  }
+};
+
+// ---------------------------------------------------------------------------
+// updateBookingStatus
+// Returns the updated booking row, or null if the booking doesn't exist.
+// ---------------------------------------------------------------------------
+const updateBookingStatus = async (bookingId, status) => {
+  requireString(bookingId, 'bookingId');
+  requireString(status, 'status');
+
+  if (status.length > 50) {
+    throw createError('status must be 50 characters or fewer', 400);
+  }
+
+  const sql = `
+    UPDATE bookings
+    SET status = $1
+    WHERE id = $2
+    RETURNING *
+  `;
+
+  try {
+    const { rows } = await query(sql, [status.trim(), bookingId]);
+    return rows[0] || null;
+  } catch (err) {
+    throw handleDbError('updateBookingStatus', err);
+  }
+};
+
+// ---------------------------------------------------------------------------
+// logMessage
+// bookingId may be null (e.g. a question sent before any booking exists).
+// clientPhone links the message to the customer for AI history and learning.
+// Returns the created message row.
+// ---------------------------------------------------------------------------
+const logMessage = async (bookingId, direction, content, intent = null, clientPhone = null) => {
+  if (!VALID_DIRECTIONS.includes(direction)) {
+    throw createError(`direction must be one of: ${VALID_DIRECTIONS.join(', ')}`, 400);
+  }
+  if (typeof content !== 'string' || content.length === 0) {
+    throw createError('content is required and must be a non-empty string', 400);
+  }
+
+  const sql = `
+    INSERT INTO messages (booking_id, direction, content, intent, client_phone)
+    VALUES ($1, $2, $3, $4, $5)
+    RETURNING *
+  `;
+
+  try {
+    const { rows } = await query(sql, [bookingId || null, direction, content, intent, clientPhone]);
+    return rows[0];
+  } catch (err) {
+    throw handleDbError('logMessage', err);
+  }
+};
+
+module.exports = {
+  createBooking,
+  findBookingByExternalId,
+  getLatestBookingForClient,
+  updateBookingStatus,
+  logMessage,
+};

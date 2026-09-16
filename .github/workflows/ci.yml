@@ -1,0 +1,71 @@
+# CI: install dependencies and run the full test suite on every push and pull request.
+# Tests run against a PostgreSQL service container (UTF8) via TEST_DATABASE_URL,
+# with mock Meta Graph API and mock OpenAI servers — no secrets required.
+
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  workflow_dispatch:
+
+# Least privilege: CI only needs to read the repository.
+permissions:
+  contents: read
+
+# Cancel superseded runs for the same branch / pull request.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Tests (Node 24, PostgreSQL 17)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          # Name must contain "test": the suite truncates tables.
+          POSTGRES_DB: laundry_test
+          POSTGRES_INITDB_ARGS: --encoding=UTF8
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d laundry_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/laundry_test
+      # Make sure nothing in tests can reach real services.
+      OPENAI_API_KEY: ''
+      NODE_ENV: test
+
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v7
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Check syntax
+        run: |
+          for f in server.js $(find src tests -name '*.js'); do
+            node --check "$f"
+          done
+
+      - name: Run tests
+        run: npm test

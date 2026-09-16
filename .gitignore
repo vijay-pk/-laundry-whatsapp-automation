@@ -1,0 +1,18 @@
+# Dependencies
+node_modules/
+
+# Environment secrets — never commit
+.env
+.env.*
+!.env.example
+
+# Local editor / agent tooling state
+.claude/settings.local.json
+.kilo/
+
+# Logs & OS files
+logs/
+*.log
+npm-debug.log*
+.DS_Store
+Thumbs.db
