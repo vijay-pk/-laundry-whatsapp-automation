@@ -70,7 +70,7 @@ describe('POST/GET /webhook', () => {
   describe('idempotency', () => {
     it('processes concurrent duplicate deliveries exactly once', async () => {
       const phone = '919200000010';
-      const payload = webhookPayload([textMessage('wamid.dup', phone, 'hello')]);
+      const payload = webhookPayload([textMessage('wamid.dup', phone, 'what are your prices?')]);
 
       const responses = await Promise.all([1, 2, 3, 4, 5].map(() => server.postWebhook(payload)));
       assert.deepEqual(responses.map((r) => r.status), [200, 200, 200, 200, 200]);
@@ -87,7 +87,7 @@ describe('POST/GET /webhook', () => {
 
     it('skips a later redelivery of a processed message', async () => {
       const phone = '919200000010';
-      await server.postWebhook(webhookPayload([textMessage('wamid.dup', phone, 'hello')]));
+      await server.postWebhook(webhookPayload([textMessage('wamid.dup', phone, 'what are your prices?')]));
       await sleep(500);
 
       assert.equal((await inboundMessages(phone)).length, 1);
@@ -172,15 +172,26 @@ describe('POST/GET /webhook', () => {
       assert.equal(graph.sentTo(phone).length, 0);
     });
 
-    it('reschedule: forwards the request to the admin', async () => {
+    it('reschedule without an active booking: suggests booking', async () => {
       const phone = '919200000060';
       await server.postWebhook(webhookPayload([textMessage('wamid.resched', phone, 'can I reschedule to friday')]));
       await waitForEventStatus('wamid.resched');
 
-      const adminMsgs = graph.sentTo(TEST_ENV.ADMIN_PHONE).filter((r) => r.body.text?.body.includes(phone));
-      assert.equal(adminMsgs.length, 1);
-      assert.match(adminMsgs[0].body.text.body, /Reschedule request/);
-      assert.equal(graph.sentTo(phone).length, 0);
+      const sent = graph.sentTo(phone);
+      assert.equal(sent.length, 1);
+      assert.match(sent[0].body.text.body, /don't have an active booking to reschedule/);
+    });
+
+    it('cancel after pickup: tells the customer and alerts the admin instead of cancelling', async () => {
+      const phone = '919200000061';
+      const booking = await createBooking(business.id, { clientPhone: phone, status: 'Processing' });
+      await server.postWebhook(webhookPayload([textMessage('wamid.cancel.late', phone, 'cancel')]));
+      await waitForEventStatus('wamid.cancel.late');
+
+      const { rows } = await query('SELECT status FROM bookings WHERE id = $1', [booking.id]);
+      assert.equal(rows[0].status, 'Processing');
+      assert.match(graph.sentTo(phone)[0].body.text.body, /already been picked up/);
+      assert.equal(graph.sentTo(TEST_ENV.ADMIN_PHONE).filter((r) => r.body.text?.body.includes(phone)).length, 1);
     });
 
     it('logs inbound and outbound messages with the client phone and intent', async () => {
@@ -210,11 +221,14 @@ describe('POST/GET /webhook', () => {
       assert.equal((await inboundMessages(phone)).length, 0);
     });
 
-    it('marks non-text messages done without replying', async () => {
+    it('replies that only text is supported for unsupported message types', async () => {
       const phone = '919200000080';
       await server.postWebhook(webhookPayload([{ id: 'wamid.image', from: phone, type: 'image', image: { id: 'm1' } }]));
       assert.equal((await waitForEventStatus('wamid.image')).status, 'done');
-      assert.equal(graph.sentTo(phone).length, 0);
+
+      const sent = graph.sentTo(phone);
+      assert.equal(sent.length, 1);
+      assert.match(sent[0].body.text.body, /only read text messages/);
     });
   });
 });

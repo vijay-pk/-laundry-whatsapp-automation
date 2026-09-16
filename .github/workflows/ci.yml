@@ -63,7 +63,7 @@ jobs:
 
       - name: Check syntax
         run: |
-          for f in server.js $(find src tests -name '*.js'); do
+          for f in server.js $(find src tests scripts -name '*.js'); do
             node --check "$f"
           done
 

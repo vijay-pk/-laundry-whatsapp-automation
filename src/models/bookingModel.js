@@ -43,7 +43,8 @@ const requireString = (value, field) => {
 
 // ---------------------------------------------------------------------------
 // createBooking
-// clientData: { clientPhone, clientName, serviceType, pickupAddress, scheduledTime, externalId? }
+// clientData: { clientPhone, clientName, serviceType, pickupAddress, scheduledTime,
+//              externalId?, notes?, source? ("api" | "whatsapp"), status? (default Pending) }
 // Returns the created booking row.
 // With externalId: returns null if this business already has a booking with that
 // externalId (duplicate request). The unique index makes this safe under concurrency.
@@ -54,8 +55,9 @@ const createBooking = async (businessId, clientData = {}) => {
 
   const sql = `
     INSERT INTO bookings
-      (business_id, client_phone, client_name, service_type, pickup_address, scheduled_time, external_id)
-    VALUES ($1, $2, $3, $4, $5, $6, $7)
+      (business_id, client_phone, client_name, service_type, pickup_address, scheduled_time,
+       external_id, notes, source, status)
+    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, COALESCE($9, 'api'), COALESCE($10, 'Pending'))
     ON CONFLICT (business_id, external_id) DO NOTHING
     RETURNING *
   `;
@@ -67,6 +69,9 @@ const createBooking = async (businessId, clientData = {}) => {
     clientData.pickupAddress ?? null,
     clientData.scheduledTime ?? null,
     clientData.externalId ?? null,
+    clientData.notes ?? null,
+    clientData.source ?? null,
+    clientData.status ?? null,
   ];
 
   try {
@@ -93,6 +98,21 @@ const findBookingByExternalId = async (businessId, externalId) => {
     return rows[0] || null;
   } catch (err) {
     throw handleDbError('findBookingByExternalId', err);
+  }
+};
+
+// ---------------------------------------------------------------------------
+// getBookingById
+// Returns the booking row, or null if none exists. Malformed ids -> 400.
+// ---------------------------------------------------------------------------
+const getBookingById = async (bookingId) => {
+  requireString(bookingId, 'bookingId');
+
+  try {
+    const { rows } = await query('SELECT * FROM bookings WHERE id = $1', [bookingId]);
+    return rows[0] || null;
+  } catch (err) {
+    throw handleDbError('getBookingById', err);
   }
 };
 
@@ -138,7 +158,7 @@ const updateBookingStatus = async (bookingId, status) => {
 
   const sql = `
     UPDATE bookings
-    SET status = $1
+    SET status = $1, updated_at = NOW()
     WHERE id = $2
     RETURNING *
   `;
@@ -148,6 +168,25 @@ const updateBookingStatus = async (bookingId, status) => {
     return rows[0] || null;
   } catch (err) {
     throw handleDbError('updateBookingStatus', err);
+  }
+};
+
+// ---------------------------------------------------------------------------
+// updateBookingSchedule
+// Returns the updated booking row, or null if the booking doesn't exist.
+// ---------------------------------------------------------------------------
+const updateBookingSchedule = async (bookingId, scheduledTime) => {
+  requireString(bookingId, 'bookingId');
+  requireString(scheduledTime, 'scheduledTime');
+
+  try {
+    const { rows } = await query(
+      'UPDATE bookings SET scheduled_time = $1, updated_at = NOW() WHERE id = $2 RETURNING *',
+      [scheduledTime, bookingId]
+    );
+    return rows[0] || null;
+  } catch (err) {
+    throw handleDbError('updateBookingSchedule', err);
   }
 };
 
@@ -182,7 +221,9 @@ const logMessage = async (bookingId, direction, content, intent = null, clientPh
 module.exports = {
   createBooking,
   findBookingByExternalId,
+  getBookingById,
   getLatestBookingForClient,
   updateBookingStatus,
+  updateBookingSchedule,
   logMessage,
 };

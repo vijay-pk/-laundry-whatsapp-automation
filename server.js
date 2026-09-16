@@ -37,9 +37,10 @@ if (!process.env.OPENAI_API_KEY) {
 
 // Load app modules after env validation. db.js throws on load if DATABASE_URL is missing.
 const { verifyWebhook, handleIncomingMessage } = require('./src/controllers/webhookController');
-const { createNewBooking } = require('./src/controllers/bookingController');
+const { createNewBooking, updateStatus } = require('./src/controllers/bookingController');
 const { verifyMetaSignature } = require('./src/utils/verifyMetaSignature');
 const { purgeOldEvents } = require('./src/models/webhookEventModel');
+const { purgeExpiredSessions } = require('./src/models/sessionModel');
 const { pool } = require('./src/config/db');
 
 const PORT = Number(process.env.PORT) || 3000;
@@ -93,8 +94,9 @@ app.get('/health', (req, res) => {
 app.get('/webhook', verifyWebhook);
 app.post('/webhook', verifyMetaSignature, handleIncomingMessage);
 
-// Third-party booking intake
+// Booking API: third-party intake + order status updates
 app.post('/api/bookings', requireApiKey, createNewBooking);
+app.patch('/api/bookings/:id/status', requireApiKey, updateStatus);
 
 // ---------------------------------------------------------------------------
 // 5. 404 handler
@@ -135,7 +137,7 @@ const server = app.listen(PORT, () => {
 
 // ---------------------------------------------------------------------------
 // 8. Background jobs
-//    Purge old webhook idempotency ids once at startup, then daily.
+//    Purge old webhook idempotency ids and abandoned chat sessions at startup, then daily.
 // ---------------------------------------------------------------------------
 const PURGE_INTERVAL_MS = 24 * 60 * 60 * 1000;
 
@@ -143,8 +145,10 @@ const runPurge = async () => {
   try {
     const removed = await purgeOldEvents();
     if (removed > 0) console.log(`[jobs] Purged ${removed} old webhook event ids`);
+    const sessions = await purgeExpiredSessions();
+    if (sessions > 0) console.log(`[jobs] Purged ${sessions} expired chat sessions`);
   } catch (err) {
-    console.error(`[jobs] Webhook event purge failed: ${err.message}`);
+    console.error(`[jobs] Purge failed: ${err.message}`);
   }
 };
 

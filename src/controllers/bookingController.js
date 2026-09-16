@@ -1,17 +1,21 @@
 /**
  * src/controllers/bookingController.js
- * Receives bookings from third-party systems and alerts the admin on WhatsApp.
+ * Booking API: intake from third-party systems (admin alerted on WhatsApp)
+ * and order status updates (customer notified on WhatsApp).
  */
 
-const { createBooking, findBookingByExternalId } = require('../models/bookingModel');
-const { sendTemplateMessage } = require('../services/whatsappService');
+const {
+  createBooking,
+  findBookingByExternalId,
+  getBookingById,
+  updateBookingStatus,
+} = require('../models/bookingModel');
+const { alertAdminNewBooking, notifyCustomerStatus } = require('../services/notificationService');
+const { STATUS_NAMES, isValidStatus } = require('../config/orderStatuses');
 
 // ---------------------------------------------------------------------------
 // 1. Configuration
 // ---------------------------------------------------------------------------
-// Approved template, assumed body: "New booking: {{1}} booked {{2}} for {{3}}."
-const ADMIN_ALERT_TEMPLATE = 'laundry_booking_alert';
-
 const REQUIRED_FIELDS = ['clientName', 'clientPhone', 'serviceType', 'scheduledTime'];
 
 const MAX_EXTERNAL_ID_LENGTH = 255;
@@ -84,40 +88,8 @@ const sameBookingDetails = (existing, incoming) =>
   (existing.pickup_address ?? null) === (incoming.pickupAddress ?? null) &&
   new Date(existing.scheduled_time).getTime() === new Date(incoming.scheduledTime).getTime();
 
-// Turn an ISO timestamp into something readable in the admin's WhatsApp alert.
-const formatForHumans = (date) => {
-  try {
-    return new Intl.DateTimeFormat('en-IN', {
-      dateStyle: 'medium',
-      timeStyle: 'short',
-      timeZone: process.env.TIMEZONE || 'UTC',
-    }).format(date);
-  } catch {
-    return date.toISOString(); // invalid TIMEZONE value, fall back to ISO
-  }
-};
-
-// Send the admin alert. Never throws: the booking is already saved, so a
-// WhatsApp failure is reported in the response rather than failing the request.
-const notifyAdmin = async (variables) => {
-  const adminPhone = process.env.ADMIN_PHONE;
-
-  if (!adminPhone) {
-    console.warn('[booking] ADMIN_PHONE not set; admin alert skipped');
-    return { sent: false, error: 'ADMIN_PHONE not configured' };
-  }
-
-  try {
-    const { messageId } = await sendTemplateMessage(adminPhone, ADMIN_ALERT_TEMPLATE, variables);
-    return { sent: true, messageId };
-  } catch (err) {
-    console.error(`[booking] Admin alert failed: ${err.message}${err.hint ? ` | hint: ${err.hint}` : ''}`);
-    return { sent: false, error: err.message };
-  }
-};
-
 // ---------------------------------------------------------------------------
-// 3. Route handler
+// 3. Route handlers
 // ---------------------------------------------------------------------------
 
 /**
@@ -152,16 +124,12 @@ const createNewBooking = async (req, res, next) => {
       });
     }
 
-    const scheduledDate = new Date(body.scheduledTime);
-    const clientName = body.clientName.trim();
-    const serviceType = body.serviceType.trim();
-
     const bookingData = {
-      clientName,
+      clientName: body.clientName.trim(),
       clientPhone: body.clientPhone.replace(/\D/g, ''), // same format as webhook `from`
-      serviceType,
+      serviceType: body.serviceType.trim(),
       pickupAddress: typeof body.pickupAddress === 'string' ? body.pickupAddress.trim() : null,
-      scheduledTime: scheduledDate.toISOString(),
+      scheduledTime: new Date(body.scheduledTime).toISOString(),
       externalId,
     };
 
@@ -198,7 +166,7 @@ const createNewBooking = async (req, res, next) => {
     console.log(`[booking] Created booking ${booking.id} for business ${businessId}`);
 
     // --- Alert admin ---------------------------------------------------------
-    const notification = await notifyAdmin([clientName, serviceType, formatForHumans(scheduledDate)]);
+    const notification = await alertAdminNewBooking(booking);
 
     // --- Respond ---------------------------------------------------------------
     return res.status(201).json({
@@ -214,6 +182,49 @@ const createNewBooking = async (req, res, next) => {
   }
 };
 
+/**
+ * PATCH /api/bookings/:id/status
+ * Body: { status }  one of STATUS_NAMES (Pending, Confirmed, Out for Pickup, ... Delivered, Cancelled)
+ *
+ * Saves the new status, then messages the customer. A WhatsApp failure does not fail
+ * the request: the status is saved and the response reports notification.sent = false.
+ * Setting the same status again does not message the customer twice.
+ */
+const updateStatus = async (req, res, next) => {
+  try {
+    const status = typeof req.body?.status === 'string' ? req.body.status.trim() : '';
+    if (!isValidStatus(status)) {
+      return res.status(400).json({
+        success: false,
+        error: 'Validation failed',
+        details: [`status must be one of: ${STATUS_NAMES.join(', ')}`],
+      });
+    }
+
+    const previous = await getBookingById(req.params.id);
+    if (!previous) {
+      return res.status(404).json({ success: false, error: 'Booking not found' });
+    }
+
+    if (previous.status === status) {
+      return res.status(200).json({
+        success: true,
+        data: previous,
+        notification: { sent: false, skipped: 'status unchanged' },
+      });
+    }
+
+    const booking = await updateBookingStatus(previous.id, status);
+    console.log(`[booking] Booking ${booking.id} status ${previous.status} -> ${status}`);
+
+    const notification = await notifyCustomerStatus(booking);
+    return res.status(200).json({ success: true, data: booking, notification });
+  } catch (err) {
+    return next(err);
+  }
+};
+
 module.exports = {
   createNewBooking,
+  updateStatus,
 };

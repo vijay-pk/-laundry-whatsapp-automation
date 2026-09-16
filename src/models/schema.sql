@@ -46,6 +46,11 @@ ALTER TABLE bookings ADD COLUMN IF NOT EXISTS external_id VARCHAR(255);
 CREATE UNIQUE INDEX IF NOT EXISTS uq_bookings_business_external_id
   ON bookings (business_id, external_id);
 
+-- Chat booking details: special instructions and where the booking came from.
+ALTER TABLE bookings ADD COLUMN IF NOT EXISTS notes TEXT;
+ALTER TABLE bookings ADD COLUMN IF NOT EXISTS source VARCHAR(20) NOT NULL DEFAULT 'api';
+ALTER TABLE bookings ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
+
 -- Serves client lookups that aren't scoped to a business
 CREATE INDEX IF NOT EXISTS idx_bookings_client_created
   ON bookings (client_phone, created_at DESC);
@@ -100,5 +105,17 @@ CREATE TABLE IF NOT EXISTS webhook_events (
 -- Serves retention cleanup
 CREATE INDEX IF NOT EXISTS idx_webhook_events_created
   ON webhook_events (created_at);
+
+-- -----------------------------------------------------------------------------
+-- conversation_sessions: where a customer is in a multi-step chat flow
+-- (booking, reschedule). One active session per client; expires after inactivity.
+-- -----------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS conversation_sessions (
+  client_phone     VARCHAR(20)  PRIMARY KEY,
+  flow             VARCHAR(30)  NOT NULL,
+  step             VARCHAR(30)  NOT NULL,
+  data             JSONB        NOT NULL DEFAULT '{}'::jsonb,
+  updated_at       TIMESTAMPTZ  NOT NULL DEFAULT NOW()
+);
 
 COMMIT;

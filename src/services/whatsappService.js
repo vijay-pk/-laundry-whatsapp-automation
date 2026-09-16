@@ -197,7 +197,101 @@ const sendTextMessage = async (toPhone, text) => {
   );
 };
 
+// WhatsApp interactive message limits
+const LIMITS = { body: 1024, buttonTitle: 20, maxButtons: 3, listButton: 20, rowTitle: 24, rowDescription: 72, maxRows: 10, id: 200 };
+
+const truncate = (text, max) => {
+  const value = String(text ?? '').trim();
+  return value.length > max ? `${value.slice(0, max - 1)}…` : value;
+};
+
+const requireBody = (text) => {
+  if (typeof text !== 'string' || text.trim() === '') throw createError('body text is required', 400);
+  return truncate(text, LIMITS.body);
+};
+
+/**
+ * Send up to 3 reply buttons. Customer taps arrive as interactive.button_reply { id, title }.
+ * Only delivered within the 24-hour customer service window.
+ *
+ * @param {string} toPhone
+ * @param {string} bodyText
+ * @param {Array<{id: string, title: string}>} buttons  1-3 buttons, titles cut to 20 chars
+ */
+const sendButtonsMessage = async (toPhone, bodyText, buttons) => {
+  const to = normalizePhone(toPhone);
+  const body = requireBody(bodyText);
+
+  if (!Array.isArray(buttons) || buttons.length === 0 || buttons.length > LIMITS.maxButtons) {
+    throw createError(`buttons must be an array of 1-${LIMITS.maxButtons} items`, 400);
+  }
+
+  return sendMessage(
+    {
+      to,
+      type: 'interactive',
+      interactive: {
+        type: 'button',
+        body: { text: body },
+        action: {
+          buttons: buttons.map((b) => ({
+            type: 'reply',
+            reply: { id: truncate(b.id, LIMITS.id), title: truncate(b.title, LIMITS.buttonTitle) },
+          })),
+        },
+      },
+    },
+    'buttons message'
+  );
+};
+
+/**
+ * Send a list (menu) of up to 10 rows. Customer picks arrive as interactive.list_reply { id, title }.
+ * Only delivered within the 24-hour customer service window.
+ *
+ * @param {string} toPhone
+ * @param {string} bodyText
+ * @param {string} buttonText  label of the button that opens the list (max 20 chars)
+ * @param {Array<{id: string, title: string, description?: string}>} rows
+ * @param {string} [sectionTitle]
+ */
+const sendListMessage = async (toPhone, bodyText, buttonText, rows, sectionTitle = 'Options') => {
+  const to = normalizePhone(toPhone);
+  const body = requireBody(bodyText);
+
+  if (!Array.isArray(rows) || rows.length === 0 || rows.length > LIMITS.maxRows) {
+    throw createError(`rows must be an array of 1-${LIMITS.maxRows} items`, 400);
+  }
+
+  return sendMessage(
+    {
+      to,
+      type: 'interactive',
+      interactive: {
+        type: 'list',
+        body: { text: body },
+        action: {
+          button: truncate(buttonText, LIMITS.listButton),
+          sections: [
+            {
+              title: truncate(sectionTitle, LIMITS.rowTitle),
+              rows: rows.map((r) => ({
+                id: truncate(r.id, LIMITS.id),
+                title: truncate(r.title, LIMITS.rowTitle),
+                ...(r.description ? { description: truncate(r.description, LIMITS.rowDescription) } : {}),
+              })),
+            },
+          ],
+        },
+      },
+    },
+    'list message'
+  );
+};
+
 module.exports = {
   sendTemplateMessage,
   sendTextMessage,
+  sendButtonsMessage,
+  sendListMessage,
 };

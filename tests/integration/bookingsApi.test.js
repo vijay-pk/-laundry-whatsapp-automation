@@ -116,6 +116,67 @@ describe('POST /api/bookings', () => {
     });
   });
 
+  describe('PATCH /api/bookings/:id/status', () => {
+    const patchStatus = (id, body, headers = { 'x-api-key': TEST_ENV.BOOKING_API_KEY }) =>
+      server.request('PATCH', `/api/bookings/${id}/status`, { body: JSON.stringify(body), headers });
+
+    let bookingId;
+    before(async () => {
+      const res = await server.postBooking(validBooking({ clientName: 'Status Test', clientPhone: '919600000001' }));
+      bookingId = res.json.data.id;
+    });
+
+    it('requires the API key', async () => {
+      assert.equal((await patchStatus(bookingId, { status: 'Ready' }, {})).status, 401);
+    });
+
+    it('updates the status and messages the customer', async () => {
+      graph.reset();
+      const res = await patchStatus(bookingId, { status: 'Out for Pickup' });
+
+      assert.equal(res.status, 200);
+      assert.equal(res.json.data.status, 'Out for Pickup');
+      assert.equal(res.json.notification.sent, true);
+      assert.equal(res.json.notification.channel, 'text');
+
+      const sent = graph.sentTo('919600000001');
+      assert.equal(sent.length, 1);
+      assert.equal(sent[0].body.text.body, 'Our driver is on the way to pick up your clothes.');
+
+      const { rows } = await query(
+        `SELECT intent FROM messages WHERE client_phone = '919600000001' AND direction = 'outbound'`
+      );
+      assert.deepEqual(rows.map((r) => r.intent), ['status_update']);
+    });
+
+    it('does not message again when the status is unchanged', async () => {
+      graph.reset();
+      const res = await patchStatus(bookingId, { status: 'Out for Pickup' });
+      assert.equal(res.status, 200);
+      assert.deepEqual(res.json.notification, { sent: false, skipped: 'status unchanged' });
+      assert.equal(graph.sentTo('919600000001').length, 0);
+    });
+
+    it('saves the status even if the WhatsApp message fails', async () => {
+      graph.failNextRequests(1);
+      const res = await patchStatus(bookingId, { status: 'Ready' });
+      assert.equal(res.status, 200);
+      assert.equal(res.json.data.status, 'Ready');
+      assert.equal(res.json.notification.sent, false);
+    });
+
+    it('rejects unknown statuses', async () => {
+      const res = await patchStatus(bookingId, { status: 'Lost' });
+      assert.equal(res.status, 400);
+      assert.match(res.json.details[0], /Out for Delivery/);
+    });
+
+    it('returns 404 for an unknown booking and 400 for a malformed id', async () => {
+      assert.equal((await patchStatus(crypto.randomUUID(), { status: 'Ready' })).status, 404);
+      assert.equal((await patchStatus('not-a-uuid', { status: 'Ready' })).status, 400);
+    });
+  });
+
   describe('idempotency', () => {
     it('returns the existing booking for a retry and does not alert again', async () => {
       graph.reset();

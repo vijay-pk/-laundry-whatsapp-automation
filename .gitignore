@@ -16,3 +16,6 @@ logs/
 npm-debug.log*
 .DS_Store
 Thumbs.db
+
+# Local development database (npm run db:local)
+.localdb/

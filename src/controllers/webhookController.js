@@ -4,13 +4,22 @@
  */
 
 const { detectIntent, generateReply } = require('../services/aiService');
-const { sendTemplateMessage, sendTextMessage } = require('../services/whatsappService');
+const { sendTemplateMessage } = require('../services/whatsappService');
+const { maskPhone, safeLog, replyText, notifyAdmin } = require('../services/replyService');
 const {
-  getLatestBookingForClient,
-  updateBookingStatus,
-  logMessage,
-} = require('../models/bookingModel');
+  FLOW_INTENT,
+  bookingRef,
+  sendWelcomeMenu,
+  startBooking,
+  startReschedule,
+  handleFlowMessage,
+} = require('../services/bookingFlow');
+const { getLatestBookingForClient, updateBookingStatus } = require('../models/bookingModel');
+const { getActiveSession } = require('../models/sessionModel');
 const { claimEvent, markEventDone, markEventFailed } = require('../models/webhookEventModel');
+const { CHANGEABLE_STATUSES, CLOSED_STATUSES, statusMessage } = require('../config/orderStatuses');
+const { servicesText } = require('../config/businessKnowledge');
+const { formatDateTime } = require('../utils/formatDate');
 
 // ---------------------------------------------------------------------------
 // 1. Configuration
@@ -18,28 +27,67 @@ const { claimEvent, markEventDone, markEventFailed } = require('../models/webhoo
 // Approved template, assumed body: "Hi {{1}}, your {{2}} booking has been cancelled."
 const CANCEL_TEMPLATE = process.env.TEMPLATE_BOOKING_CANCELLED || 'booking_cancelled';
 
-// Bookings in these states can no longer be cancelled or confirmed.
-const CLOSED_STATUSES = ['Cancelled', 'Delivered'];
-
 // Outbound intent for replies that handed the customer to staff.
 // Excluded from AI learning so "we'll get back to you" isn't reused as an answer.
 const HANDOFF_INTENT = 'handoff';
 
+// Typed words that open the main menu without asking the AI.
+const MENU_WORDS = /^(menu|start|main menu)$/i;
+
+const MAX_PROFILE_NAME_LENGTH = 60;
+
 // ---------------------------------------------------------------------------
-// 2. Helpers
+// 2. Parsing
 // ---------------------------------------------------------------------------
 
-// Only log the last 4 digits. Phone numbers are customer PII.
-const maskPhone = (phone) => `***${String(phone).slice(-4)}`;
-
-// Collect every message in the payload. Meta can batch several entries/changes/messages
-// into one delivery. Status updates (sent/delivered/read) have no messages.
+// Collect every message in the payload with the sender's WhatsApp profile name.
+// Meta can batch several entries/changes/messages into one delivery.
+// Status updates (sent/delivered/read) have no messages.
 const extractMessages = (body) =>
   (Array.isArray(body?.entry) ? body.entry : []).flatMap((entry) =>
-    (Array.isArray(entry?.changes) ? entry.changes : []).flatMap((change) =>
-      Array.isArray(change?.value?.messages) ? change.value.messages : []
-    )
+    (Array.isArray(entry?.changes) ? entry.changes : []).flatMap((change) => {
+      const value = change?.value;
+      const contacts = Array.isArray(value?.contacts) ? value.contacts : [];
+      const messages = Array.isArray(value?.messages) ? value.messages : [];
+
+      return messages.map((message) => {
+        const contact = contacts.find((c) => c?.wa_id === message?.from) ?? contacts[0];
+        const name = typeof contact?.profile?.name === 'string' ? contact.profile.name.trim() : '';
+        return { message, profileName: name.slice(0, MAX_PROFILE_NAME_LENGTH) || null };
+      });
+    })
   );
+
+/**
+ * Normalize a WhatsApp message into:
+ *   { type: 'text', text } | { type: 'choice', id, title } | { type: 'location', location } | { type: 'other', kind }
+ */
+const parseInput = (message) => {
+  switch (message.type) {
+    case 'text':
+      return { type: 'text', text: message.text?.body?.trim() || '' };
+    case 'interactive': {
+      const reply = message.interactive?.button_reply || message.interactive?.list_reply;
+      return reply?.id ? { type: 'choice', id: String(reply.id), title: String(reply.title || '') } : { type: 'other', kind: 'interactive' };
+    }
+    case 'button': // quick-reply button on a template message
+      return { type: 'choice', id: String(message.button?.payload || message.button?.text || ''), title: String(message.button?.text || '') };
+    case 'location':
+      return { type: 'location', location: message.location || null };
+    default:
+      return { type: 'other', kind: message.type };
+  }
+};
+
+// How an inbound message is recorded in the conversation log.
+const describeInput = (input) => {
+  switch (input.type) {
+    case 'text': return input.text;
+    case 'choice': return `[tap] ${input.title || input.id}`;
+    case 'location': return `[location] ${input.location?.latitude},${input.location?.longitude}`;
+    default: return `[${input.kind}]`;
+  }
+};
 
 // If the AI call fails, fall back to 'other' so the customer still gets a reply.
 const resolveIntent = async (text) => {
@@ -53,34 +101,7 @@ const resolveIntent = async (text) => {
   }
 };
 
-// A failed database log must never block a reply to the customer.
-const safeLog = async (bookingId, direction, content, intent, clientPhone) => {
-  try {
-    await logMessage(bookingId, direction, content, intent, clientPhone);
-  } catch (err) {
-    console.error(`[webhook] Failed to log ${direction} message: ${err.message}`);
-  }
-};
-
-// Send a text reply to the client and record it in the conversation log.
-const replyText = async (to, booking, text, intent) => {
-  await sendTextMessage(to, text);
-  await safeLog(booking?.id ?? null, 'outbound', text, intent, to);
-};
-
-// Send a plain-text note to the admin. Returns false if ADMIN_PHONE is missing.
-const notifyAdmin = async (lines) => {
-  const adminPhone = process.env.ADMIN_PHONE;
-  if (!adminPhone) {
-    console.warn('[webhook] ADMIN_PHONE not set; admin notification skipped');
-    return false;
-  }
-  await sendTextMessage(adminPhone, lines.join('\n'));
-  return true;
-};
-
-const formatSlot = (booking) =>
-  booking?.scheduled_time ? new Date(booking.scheduled_time).toLocaleString() : 'n/a';
+const isActive = (booking) => booking && !CLOSED_STATUSES.includes(booking.status);
 
 // ---------------------------------------------------------------------------
 // 3. Intent handlers
@@ -92,6 +113,14 @@ const handleCancel = async (from, booking) => {
   if (CLOSED_STATUSES.includes(booking.status)) {
     return replyText(from, booking, `Your booking is already ${booking.status.toLowerCase()}.`, 'cancel');
   }
+  if (!CHANGEABLE_STATUSES.includes(booking.status)) {
+    await replyText(from, booking, 'Your clothes have already been picked up, so we can’t cancel online. Our team will contact you shortly.', HANDOFF_INTENT);
+    return notifyAdmin([
+      'Cancellation requested after pickup - please call the customer.',
+      `Booking: #${bookingRef(booking)} (${booking.client_name || 'Unknown'}, +${from})`,
+      `Status: ${booking.status}`,
+    ]);
+  }
 
   await updateBookingStatus(booking.id, 'Cancelled');
 
@@ -99,21 +128,25 @@ const handleCancel = async (from, booking) => {
     booking.client_name || 'Customer',
     booking.service_type || 'laundry',
   ]);
-  await safeLog(booking.id, 'outbound', `[template:${CANCEL_TEMPLATE}]`, 'cancel', from);
+  await safeLog(booking, 'outbound', `[template:${CANCEL_TEMPLATE}]`, 'cancel', from);
 
   console.log(`[webhook] Booking ${booking.id} cancelled by ${maskPhone(from)}`);
 };
 
 const handleReschedule = async (from, booking, text) => {
-  const sent = await notifyAdmin([
-    'Reschedule request - please follow up.',
-    `Client: ${booking?.client_name || 'Unknown'} (+${from})`,
-    `Booking: ${booking?.id || 'none found'}`,
-    `Current slot: ${formatSlot(booking)}`,
-    `Message: "${text}"`,
-  ]);
-
-  if (sent) console.log(`[webhook] Reschedule request from ${maskPhone(from)} forwarded to admin`);
+  if (!isActive(booking)) {
+    return replyText(from, booking, "You don't have an active booking to reschedule. Reply *book* to schedule a pickup.", 'reschedule');
+  }
+  if (!CHANGEABLE_STATUSES.includes(booking.status)) {
+    await replyText(from, booking, 'Your clothes have already been picked up. Our team will contact you to arrange the delivery time.', HANDOFF_INTENT);
+    return notifyAdmin([
+      'Reschedule requested after pickup - please follow up.',
+      `Booking: #${bookingRef(booking)} (${booking.client_name || 'Unknown'}, +${from})`,
+      `Status: ${booking.status}`,
+      `Message: "${text}"`,
+    ]);
+  }
+  return startReschedule({ from, booking });
 };
 
 const handleConfirm = async (from, booking) => {
@@ -130,7 +163,33 @@ const handleConfirm = async (from, booking) => {
   console.log(`[webhook] Booking ${booking.id} confirmed by ${maskPhone(from)}`);
 };
 
-// Questions, greetings and anything else: AI answers from business info and past answers.
+const handleTrack = async (from, booking) => {
+  if (!booking) {
+    return replyText(from, null, "You don't have any orders yet. Reply *book* to schedule a pickup.", 'status');
+  }
+  return replyText(
+    from,
+    booking,
+    [
+      `Order #${bookingRef(booking)}${booking.service_type ? ` - ${booking.service_type}` : ''}`,
+      `Status: *${booking.status}*`,
+      statusMessage(booking, formatDateTime),
+    ].join('\n'),
+    'status'
+  );
+};
+
+const handlePrices = (from) =>
+  replyText(from, null, `${servicesText()}\n\nReply *book* to schedule a pickup.`, 'menu');
+
+const handleBook = (from, booking, profileName) =>
+  startBooking({
+    from,
+    name: booking?.client_name || profileName,
+    savedAddress: booking?.pickup_address || null,
+  });
+
+// Questions and anything else: AI answers from business info and past answers.
 const handleGeneral = async (from, booking, text, intent) => {
   const { reply, needsHuman } = await generateReply(text, from);
 
@@ -145,45 +204,80 @@ const handleGeneral = async (from, booking, text, intent) => {
   }
 };
 
+// Taps on main-menu buttons (or old menus) when no flow is active.
+const handleMenuChoice = async (from, input, booking, profileName) => {
+  switch (input.id) {
+    case 'menu_book':
+      return handleBook(from, booking, profileName);
+    case 'menu_track':
+      return handleTrack(from, booking);
+    case 'menu_prices':
+      return handlePrices(from);
+    default:
+      // A button from a flow that has expired or finished
+      await replyText(from, null, 'That menu has expired.', 'menu');
+      return sendWelcomeMenu(from, profileName || booking?.client_name);
+  }
+};
+
 // ---------------------------------------------------------------------------
 // 4. Main processing pipeline (runs after Meta has received its 200)
 // ---------------------------------------------------------------------------
-const processMessage = async (message) => {
-  // Only text is supported for now (image, audio, button, etc. are ignored)
-  if (message.type !== 'text') {
-    console.log(`[webhook] Ignoring unsupported message type: ${message.type}`);
-    return;
+const processMessage = async ({ message, profileName }) => {
+  const from = message.from;
+  if (!from) return;
+
+  const input = parseInput(message);
+  if (input.type === 'text' && !input.text) return;
+
+  // Customers inside a booking/reschedule flow continue it.
+  const session = await getActiveSession(from);
+  let logged = false;
+  if (session) {
+    await safeLog(session.data?.bookingId ?? null, 'inbound', describeInput(input), FLOW_INTENT, from);
+    logged = true;
+    if (await handleFlowMessage({ from, input, session })) return;
+    // Otherwise the flow was left (e.g. "menu"): handle as a fresh message below.
   }
 
-  const from = message.from;
-  const text = message.text?.body?.trim();
-  if (!from || !text) return;
+  if (input.type === 'choice') {
+    const booking = await getLatestBookingForClient(from);
+    if (!logged) await safeLog(booking, 'inbound', describeInput(input), 'menu', from);
+    return handleMenuChoice(from, input, booking, profileName);
+  }
+
+  if (input.type !== 'text') {
+    if (!logged) await safeLog(null, 'inbound', describeInput(input), 'unsupported', from);
+    console.log(`[webhook] Unsupported message type from ${maskPhone(from)}: ${input.kind || input.type}`);
+    return replyText(from, null, 'Sorry, I can only read text messages for now. Send *Hi* to see the menu.', 'unsupported');
+  }
+
+  const text = input.text;
 
   // Intent detection and booking lookup don't depend on each other, so run them in parallel.
   const [intent, booking] = await Promise.all([
-    resolveIntent(text),
+    MENU_WORDS.test(text) ? 'greeting' : resolveIntent(text),
     getLatestBookingForClient(from),
   ]);
 
-  await safeLog(booking?.id ?? null, 'inbound', text, intent, from);
+  if (!logged) await safeLog(booking, 'inbound', text, intent, from);
   console.log(`[webhook] ${maskPhone(from)} intent=${intent} booking=${booking?.id ?? 'none'}`);
 
   switch (intent) {
+    case 'greeting':
+      return sendWelcomeMenu(from, profileName || booking?.client_name);
+    case 'book':
+      return handleBook(from, booking, profileName);
+    case 'status':
+      return handleTrack(from, booking);
     case 'cancel':
-      await handleCancel(from, booking);
-      break;
-
+      return handleCancel(from, booking);
     case 'reschedule':
-      await handleReschedule(from, booking, text);
-      break;
-
+      return handleReschedule(from, booking, text);
     case 'confirm':
-      await handleConfirm(from, booking);
-      break;
-
+      return handleConfirm(from, booking);
     default:
-      await handleGeneral(from, booking, text, intent);
-      break;
+      return handleGeneral(from, booking, text, intent);
   }
 };
 
@@ -192,7 +286,8 @@ const processMessage = async (message) => {
 //    Claim the message id before doing anything, so a duplicate delivery
 //    (even one arriving while the first is still running) is skipped.
 // ---------------------------------------------------------------------------
-const processOnce = async (message) => {
+const processOnce = async (item) => {
+  const { message } = item;
   if (!message?.id) {
     console.warn('[webhook] Message without id; cannot deduplicate, skipping');
     return;
@@ -213,7 +308,7 @@ const processOnce = async (message) => {
   }
 
   try {
-    await processMessage(message);
+    await processMessage(item);
   } catch (err) {
     console.error(
       `[webhook] Failed to process message ${message.id} from ${maskPhone(message.from)}: ` +
@@ -266,8 +361,8 @@ const handleIncomingMessage = async (req, res) => {
 
   // Empty for delivery/read status updates: nothing to do.
   // Sequential, so a customer's messages are handled in the order sent.
-  for (const message of extractMessages(req.body)) {
-    await processOnce(message); // never throws
+  for (const item of extractMessages(req.body)) {
+    await processOnce(item); // never throws
   }
 };
 

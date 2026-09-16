@@ -1,6 +1,6 @@
 /**
  * src/config/businessKnowledge.js
- * Facts the AI assistant is allowed to use when answering customers.
+ * Facts about the business, used by the AI assistant and the chat booking flow.
  *
  * This is the source of truth: if a past AI answer conflicts with this file,
  * this file wins. Correct wrong answers by editing here.
@@ -18,17 +18,28 @@ const businessKnowledge = {
   serviceArea: '[EDIT] Areas/pincodes where pickup and delivery are available',
   contactPhone: '[EDIT] +91 00000 00000',
 
+  // Shown as the booking menu. `id` must stay stable (stored in chat sessions);
+  // `name` max 24 characters (WhatsApp list row limit).
   // [EDIT] Prices are examples. Set real prices or remove lines.
   services: [
-    { name: 'Wash & Fold', price: '[EDIT] ₹60 per kg', turnaround: '24-48 hours' },
-    { name: 'Wash & Iron', price: '[EDIT] ₹90 per kg', turnaround: '48 hours' },
-    { name: 'Ironing only', price: '[EDIT] ₹15 per piece', turnaround: '24 hours' },
-    { name: 'Dry Cleaning', price: '[EDIT] from ₹150 per piece', turnaround: '3-4 days' },
+    { id: 'wash_fold', name: 'Wash & Fold', price: '[EDIT] ₹60 per kg', turnaround: '24-48 hours' },
+    { id: 'wash_iron', name: 'Wash & Iron', price: '[EDIT] ₹90 per kg', turnaround: '48 hours' },
+    { id: 'ironing', name: 'Ironing only', price: '[EDIT] ₹15 per piece', turnaround: '24 hours' },
+    { id: 'dry_clean', name: 'Dry Cleaning', price: '[EDIT] from ₹150 per piece', turnaround: '3-4 days' },
   ],
+
+  // Pickup windows offered in chat (24h "HH:MM", in the TIMEZONE env timezone).
+  pickupSlots: [
+    { start: '10:00', end: '12:00' },
+    { start: '16:00', end: '18:00' },
+  ],
+  slotDaysAhead: 3,        // today + next N-1 days
+  closedWeekdays: [0],     // 0 = Sunday ... 6 = Saturday
+  minLeadMinutes: 60,      // a slot must start at least this far in the future
 
   policies: [
     '[EDIT] Free pickup and delivery on orders above ₹300.',
-    'Bookings can be cancelled or rescheduled by replying on WhatsApp.',
+    'Bookings can be made, tracked, cancelled or rescheduled by replying on WhatsApp.',
     '[EDIT] Payment by UPI, card or cash on delivery.',
   ],
 };
@@ -56,4 +67,8 @@ const toPromptText = (kb = businessKnowledge) => {
   return lines.filter(Boolean).join('\n');
 };
 
-module.exports = { businessKnowledge, toPromptText };
+// Price list for customers.
+const servicesText = (kb = businessKnowledge) =>
+  ['Our services:', ...kb.services.map((s) => `• ${s.name}: ${s.price} (ready in ${s.turnaround})`)].join('\n');
+
+module.exports = { businessKnowledge, toPromptText, servicesText };

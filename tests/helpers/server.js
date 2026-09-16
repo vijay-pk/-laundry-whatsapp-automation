@@ -122,7 +122,8 @@ const startServer = async ({ graphUrl, env = {} }) => {
 };
 
 // Build a Meta webhook payload containing the given messages.
-const webhookPayload = (messages) => ({
+// options.profileName adds the sender's WhatsApp profile (value.contacts).
+const webhookPayload = (messages, { profileName } = {}) => ({
   object: 'whatsapp_business_account',
   entry: [
     {
@@ -130,7 +131,12 @@ const webhookPayload = (messages) => ({
       changes: [
         {
           field: 'messages',
-          value: { messaging_product: 'whatsapp', metadata: { phone_number_id: TEST_ENV.PHONE_NUMBER_ID }, messages },
+          value: {
+            messaging_product: 'whatsapp',
+            metadata: { phone_number_id: TEST_ENV.PHONE_NUMBER_ID },
+            ...(profileName ? { contacts: messages.map((m) => ({ profile: { name: profileName }, wa_id: m.from })) } : {}),
+            messages,
+          },
         },
       ],
     },
@@ -139,4 +145,11 @@ const webhookPayload = (messages) => ({
 
 const textMessage = (id, from, body) => ({ id, from, timestamp: '1700000000', type: 'text', text: { body } });
 
-module.exports = { TEST_ENV, startServer, webhookPayload, textMessage, waitFor, sleep };
+// Customer tapped a reply button (kind 'button_reply') or picked a list row (kind 'list_reply').
+const tapMessage = (id, from, replyId, title = replyId, kind = 'button_reply') => ({
+  id, from, timestamp: '1700000000', type: 'interactive', interactive: { type: kind, [kind]: { id: replyId, title } },
+});
+
+const locationMessage = (id, from, location) => ({ id, from, timestamp: '1700000000', type: 'location', location });
+
+module.exports = { TEST_ENV, startServer, webhookPayload, textMessage, tapMessage, locationMessage, waitFor, sleep };

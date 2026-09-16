@@ -22,7 +22,7 @@ const { pool, query } = require('../../src/config/db');
 
 // Empty all tables so each test file starts clean.
 const resetDb = async () => {
-  await query('TRUNCATE webhook_events, messages, bookings, businesses CASCADE');
+  await query('TRUNCATE conversation_sessions, webhook_events, messages, bookings, businesses CASCADE');
 };
 
 let businessCounter = 0;

@@ -26,6 +26,12 @@ describe('keywordIntent', () => {
     ['what are your timings', 'question'],
     ['do you deliver to my area', 'question'],
     ['thanks bro', 'other'],
+    ['book a pickup', 'book'],
+    ['I need a pickup tomorrow', 'book'],
+    ['I want to place an order', 'book'],
+    ['where is my laundry', 'status'],
+    ['track my order', 'status'],
+    ['is my clothes ready', 'status'],
   ];
 
   for (const [text, expected] of cases) {
