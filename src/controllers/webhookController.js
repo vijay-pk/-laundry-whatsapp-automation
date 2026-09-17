@@ -246,6 +246,13 @@ const processMessage = async ({ message, profileName }) => {
     return handleMenuChoice(from, input, booking, profileName);
   }
 
+  // A location outside any flow can't be checked against a booking: guide the customer to book.
+  // (Inside the booking flow, locations are handled by the geofencing step in bookingFlow.)
+  if (input.type === 'location') {
+    if (!logged) await safeLog(null, 'inbound', describeInput(input), 'location', from);
+    return replyText(from, null, 'Thanks for sharing your location! To book a pickup, send *book* and choose a service first.', 'menu');
+  }
+
   if (input.type !== 'text') {
     if (!logged) await safeLog(null, 'inbound', describeInput(input), 'unsupported', from);
     console.log(`[webhook] Unsupported message type from ${maskPhone(from)}: ${input.kind || input.type}`);

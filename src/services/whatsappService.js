@@ -289,9 +289,27 @@ const sendListMessage = async (toPhone, bodyText, buttonText, rows, sectionTitle
   );
 };
 
+/**
+ * Text asking the customer to share their location with WhatsApp's native
+ * Location attachment (used for the pickup service-area check).
+ * @param {number} [radiusKm] service radius shown to the customer
+ */
+const locationRequestText = (radiusKm = Number(process.env.MAX_DELIVERY_RADIUS_KM) || 5) =>
+  `Please share your pickup location so we can check if you are within our ${radiusKm}km service area. ` +
+  'Click the 📎 attachment icon -> Location -> Send your current location.';
+
+/**
+ * Ask the customer to share their pickup location.
+ * Only delivered within the 24-hour customer service window.
+ * @param {string} toPhone
+ */
+const sendLocationRequest = (toPhone) => sendTextMessage(toPhone, locationRequestText());
+
 module.exports = {
   sendTemplateMessage,
   sendTextMessage,
+  sendLocationRequest,
+  locationRequestText,
   sendButtonsMessage,
   sendListMessage,
 };

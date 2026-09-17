@@ -125,6 +125,47 @@ describe('bookingModel', () => {
     });
   });
 
+  describe('geofencing fields', () => {
+    it('defaults booking_state to pending with no coordinates', async () => {
+      const b = await bookings.createBooking(business.id, { clientPhone: '919000000040' });
+      assert.equal(b.booking_state, 'pending');
+      assert.equal(b.latitude, null);
+      assert.equal(b.distance_km, null);
+    });
+
+    it('saves coordinates, distance and state on create', async () => {
+      const b = await bookings.createBooking(business.id, {
+        clientPhone: '919000000041', latitude: 12.989612, longitude: 77.594612, distanceKm: 2.01, bookingState: 'confirmed',
+      });
+      assert.equal(b.booking_state, 'confirmed');
+      assert.equal(Number(b.latitude), 12.989612);
+      assert.equal(Number(b.longitude), 77.594612);
+      assert.equal(Number(b.distance_km), 2.01);
+    });
+
+    it('updates state and coordinates with the status, keeping unspecified fields', async () => {
+      const b = await bookings.createBooking(business.id, { clientPhone: '919000000042', bookingState: 'awaiting_location' });
+
+      const rejected = await bookings.updateBookingStatus(b.id, 'Cancelled', {
+        bookingState: 'rejected', latitude: 13.06, longitude: 77.59, distanceKm: 9.8,
+      });
+      assert.equal(rejected.status, 'Cancelled');
+      assert.equal(rejected.booking_state, 'rejected');
+      assert.equal(Number(rejected.distance_km), 9.8);
+
+      const statusOnly = await bookings.updateBookingStatus(b.id, 'Pending');
+      assert.equal(statusOnly.booking_state, 'rejected', 'state unchanged when not given');
+      assert.equal(Number(statusOnly.latitude), 13.06);
+    });
+
+    it('rejects invalid coordinates and states with 400', async () => {
+      await assert.rejects(bookings.createBooking(business.id, { clientPhone: '91900', latitude: 'north' }), { status: 400 });
+      await assert.rejects(bookings.createBooking(business.id, { clientPhone: '91900', bookingState: 'x'.repeat(31) }), { status: 400 });
+      const b = await bookings.createBooking(business.id, { clientPhone: '919000000043' });
+      await assert.rejects(bookings.updateBookingStatus(b.id, 'Ready', { distanceKm: 'far' }), { status: 400 });
+    });
+  });
+
   describe('logMessage', () => {
     it('stores a message with client phone and optional booking', async () => {
       const m = await bookings.logMessage(null, 'inbound', 'hello', 'greeting', '919000000030');

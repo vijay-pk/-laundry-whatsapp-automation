@@ -51,6 +51,15 @@ ALTER TABLE bookings ADD COLUMN IF NOT EXISTS notes TEXT;
 ALTER TABLE bookings ADD COLUMN IF NOT EXISTS source VARCHAR(20) NOT NULL DEFAULT 'api';
 ALTER TABLE bookings ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
 
+-- Geofencing: customer's shared pickup location and its distance from the business.
+-- booking_state tracks the booking conversation outcome:
+--   'pending' (default, e.g. API bookings), 'awaiting_location', 'confirmed',
+--   'rejected' (outside the service radius).
+ALTER TABLE bookings ADD COLUMN IF NOT EXISTS latitude DECIMAL(9, 6);
+ALTER TABLE bookings ADD COLUMN IF NOT EXISTS longitude DECIMAL(9, 6);
+ALTER TABLE bookings ADD COLUMN IF NOT EXISTS distance_km DECIMAL(7, 2);
+ALTER TABLE bookings ADD COLUMN IF NOT EXISTS booking_state VARCHAR(30) NOT NULL DEFAULT 'pending';
+
 -- Serves client lookups that aren't scoped to a business
 CREATE INDEX IF NOT EXISTS idx_bookings_client_created
   ON bookings (client_phone, created_at DESC);

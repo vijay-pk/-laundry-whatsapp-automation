@@ -1,7 +1,8 @@
 /**
  * src/services/bookingFlow.js
  * Multi-step WhatsApp chat flows, driven by conversation_sessions:
- *   booking:    service -> pickup slot -> address -> name -> instructions -> confirm
+ *   booking:    service -> [location check] -> pickup slot -> address -> name -> instructions -> confirm
+ *               (location check only when BUSINESS_LAT/BUSINESS_LNG are set: geofencing)
  *   reschedule: pickup slot -> update booking
  *
  * Customers can tap buttons/lists or type (numbers or text). "stop" ends a flow,
@@ -10,11 +11,14 @@
 
 const { businessKnowledge } = require('../config/businessKnowledge');
 const { listSlots, findSlot } = require('./slotService');
-const { replyText, replyButtons, replyList, notifyAdmin, maskPhone } = require('./replyService');
+const { replyText, replyButtons, replyList, notifyAdmin, maskPhone, safeLog } = require('./replyService');
+const { sendLocationRequest, locationRequestText } = require('./whatsappService');
 const { alertAdminNewBooking } = require('./notificationService');
 const { saveSession, clearSession } = require('../models/sessionModel');
 const { createBooking, updateBookingSchedule } = require('../models/bookingModel');
 const { formatDateTime } = require('../utils/formatDate');
+const { getServiceArea, checkServiceArea, parseCoordinates } = require('../utils/geo');
+const { recordRejectedRequest, notifyAdminGeofencedBooking } = require('./serviceAreaService');
 
 // ---------------------------------------------------------------------------
 // 1. Configuration
@@ -112,6 +116,18 @@ const askSlot = async (from, flow, data, prefix = '') => {
   return true;
 };
 
+// ---------------------------------------------------------------------------
+// Geofencing: ask for the customer's native WhatsApp location after they pick a service.
+// ---------------------------------------------------------------------------
+const askLocation = async (from, data, prefix = '') => {
+  await saveSession(from, FLOW.BOOKING, 'location', data);
+  if (prefix) {
+    return replyText(from, null, `${prefix}${locationRequestText(getServiceArea().radiusKm)}`, FLOW_INTENT);
+  }
+  await sendLocationRequest(from);
+  return safeLog(null, 'outbound', locationRequestText(getServiceArea().radiusKm), FLOW_INTENT, from);
+};
+
 const askAddress = async (from, data) => {
   if (data.savedAddress) {
     await saveSession(from, FLOW.BOOKING, 'address_choice', data);
@@ -127,7 +143,11 @@ const askAddress = async (from, data) => {
     );
   }
   await saveSession(from, FLOW.BOOKING, 'address', data);
-  return replyText(from, null, 'Please send your pickup address (house no., street, area, landmark), or share your location 📎.', FLOW_INTENT);
+  // Location already verified: we only need the details a map pin can't give.
+  const prompt = data.geo
+    ? 'Thanks! Please send your house/flat number, street and a landmark for the pickup.'
+    : 'Please send your pickup address (house no., street, area, landmark), or share your location 📎.';
+  return replyText(from, null, prompt, FLOW_INTENT);
 };
 
 const askName = async (from, data) => {
@@ -155,6 +175,7 @@ const bookingSummary = (data) => {
     `🧺 Service: ${service?.name ?? data.serviceId}`,
     `🕒 Pickup: ${data.slot.title} (${data.slot.description})`,
     `📍 Address: ${data.address}`,
+    ...(data.geo ? [`📌 Distance: ${data.geo.distanceKm} km from our store`] : []),
     `👤 Name: ${data.name}`,
     `📝 Instructions: ${data.notes || 'None'}`,
   ].join('\n');
@@ -200,6 +221,43 @@ const bookingSteps = {
 
     data.serviceId = option.service.id;
     data.retries = 0;
+
+    // Geofencing enabled -> verify the pickup location before offering slots.
+    if (getServiceArea().enabled) return askLocation(from, data);
+    return askSlot(from, FLOW.BOOKING, data);
+  },
+
+  // Geofencing step: customer must share a native WhatsApp location (not text).
+  location: async (ctx) => {
+    const { from, input, data } = ctx;
+
+    const coords = input.type === 'location' ? parseCoordinates(input.location?.latitude, input.location?.longitude) : null;
+    if (!coords) {
+      return invalid(ctx, 'Please share your location using the 📎 attachment icon (typed addresses can’t be checked).', (p) =>
+        askLocation(from, data, p)
+      );
+    }
+
+    const area = getServiceArea();
+    data.retries = 0;
+    if (!area.enabled) return askSlot(from, FLOW.BOOKING, data); // config removed mid-conversation
+
+    const { distanceKm, withinRadius, radiusKm } = checkServiceArea(coords.latitude, coords.longitude, area);
+    const service = businessKnowledge.services.find((s) => s.id === data.serviceId);
+    console.log(`[flow] Location check for ${maskPhone(from)}: ${distanceKm} km (limit ${radiusKm} km) -> ${withinRadius ? 'inside' : 'outside'}`);
+
+    // Outside the radius: end the flow, record the request for reporting, tell the customer.
+    if (!withinRadius) {
+      await clearSession(from);
+      await recordRejectedRequest({
+        from, name: data.name, serviceName: service?.name ?? data.serviceId, distanceKm, ...coords,
+      });
+      const rejection = `Sorry, your location is outside our ${radiusKm}km service radius. We cannot process this booking.`;
+      return replyText(from, null, rejection, FLOW_INTENT);
+    }
+
+    // Inside the radius: keep the coordinates for the booking and continue.
+    data.geo = { latitude: coords.latitude, longitude: coords.longitude, distanceKm };
     return askSlot(from, FLOW.BOOKING, data);
   },
 
@@ -319,6 +377,10 @@ const bookingSteps = {
       notes: data.notes,
       source: 'whatsapp',
       status: 'Confirmed',
+      bookingState: 'confirmed',
+      latitude: data.geo?.latitude,
+      longitude: data.geo?.longitude,
+      distanceKm: data.geo?.distanceKm,
     });
 
     await clearSession(from);
@@ -339,6 +401,9 @@ const bookingSteps = {
     );
 
     await alertAdminNewBooking(booking);
+
+    // Geofenced booking: send the admin the customer's details and a map link to the pickup point.
+    if (data.geo) await notifyAdminGeofencedBooking(booking, data);
   },
 };
 

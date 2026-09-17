@@ -44,20 +44,41 @@ const requireString = (value, field) => {
 // ---------------------------------------------------------------------------
 // createBooking
 // clientData: { clientPhone, clientName, serviceType, pickupAddress, scheduledTime,
-//              externalId?, notes?, source? ("api" | "whatsapp"), status? (default Pending) }
+//              externalId?, notes?, source? ("api" | "whatsapp"), status? (default Pending),
+//              latitude?, longitude?, distanceKm?, bookingState? (default 'pending') }
 // Returns the created booking row.
 // With externalId: returns null if this business already has a booking with that
 // externalId (duplicate request). The unique index makes this safe under concurrency.
+// Note: pg returns DECIMAL columns (latitude, longitude, distance_km) as strings.
 // ---------------------------------------------------------------------------
+const MAX_BOOKING_STATE_LENGTH = 30;
+
+const validateGeoFields = (data) => {
+  for (const field of ['latitude', 'longitude', 'distanceKm']) {
+    const value = data[field];
+    if (value !== undefined && value !== null && !Number.isFinite(Number(value))) {
+      throw createError(`${field} must be a number`, 400);
+    }
+  }
+  if (data.bookingState !== undefined && data.bookingState !== null) {
+    requireString(data.bookingState, 'bookingState');
+    if (data.bookingState.length > MAX_BOOKING_STATE_LENGTH) {
+      throw createError(`bookingState must be ${MAX_BOOKING_STATE_LENGTH} characters or fewer`, 400);
+    }
+  }
+};
+
 const createBooking = async (businessId, clientData = {}) => {
   requireString(businessId, 'businessId');
   requireString(clientData.clientPhone, 'clientData.clientPhone');
+  validateGeoFields(clientData);
 
   const sql = `
     INSERT INTO bookings
       (business_id, client_phone, client_name, service_type, pickup_address, scheduled_time,
-       external_id, notes, source, status)
-    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, COALESCE($9, 'api'), COALESCE($10, 'Pending'))
+       external_id, notes, source, status, latitude, longitude, distance_km, booking_state)
+    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, COALESCE($9, 'api'), COALESCE($10, 'Pending'),
+            $11, $12, $13, COALESCE($14, 'pending'))
     ON CONFLICT (business_id, external_id) DO NOTHING
     RETURNING *
   `;
@@ -72,6 +93,10 @@ const createBooking = async (businessId, clientData = {}) => {
     clientData.notes ?? null,
     clientData.source ?? null,
     clientData.status ?? null,
+    clientData.latitude ?? null,
+    clientData.longitude ?? null,
+    clientData.distanceKm ?? null,
+    clientData.bookingState ?? null,
   ];
 
   try {
@@ -146,11 +171,14 @@ const getLatestBookingForClient = async (clientPhone, businessId = null) => {
 
 // ---------------------------------------------------------------------------
 // updateBookingStatus
+// Optional `extra`: { bookingState?, latitude?, longitude?, distanceKm? }
+// Only fields that are provided are changed; others keep their current value.
 // Returns the updated booking row, or null if the booking doesn't exist.
 // ---------------------------------------------------------------------------
-const updateBookingStatus = async (bookingId, status) => {
+const updateBookingStatus = async (bookingId, status, extra = {}) => {
   requireString(bookingId, 'bookingId');
   requireString(status, 'status');
+  validateGeoFields(extra);
 
   if (status.length > 50) {
     throw createError('status must be 50 characters or fewer', 400);
@@ -158,13 +186,25 @@ const updateBookingStatus = async (bookingId, status) => {
 
   const sql = `
     UPDATE bookings
-    SET status = $1, updated_at = NOW()
+    SET status = $1,
+        booking_state = COALESCE($3, booking_state),
+        latitude = COALESCE($4, latitude),
+        longitude = COALESCE($5, longitude),
+        distance_km = COALESCE($6, distance_km),
+        updated_at = NOW()
     WHERE id = $2
     RETURNING *
   `;
 
   try {
-    const { rows } = await query(sql, [status.trim(), bookingId]);
+    const { rows } = await query(sql, [
+      status.trim(),
+      bookingId,
+      extra.bookingState ?? null,
+      extra.latitude ?? null,
+      extra.longitude ?? null,
+      extra.distanceKm ?? null,
+    ]);
     return rows[0] || null;
   } catch (err) {
     throw handleDbError('updateBookingStatus', err);

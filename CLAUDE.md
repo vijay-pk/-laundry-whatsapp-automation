@@ -41,7 +41,8 @@ ngrok http 3000                               # public HTTPS URL for Meta webhoo
 
 - `tests/run.js` (`npm test`): starts **embedded-postgres** (initdb `UTF8`) on a free port in a temp dir, applies `schema.sql`, runs `tests/**/*.test.js` one file at a time with `DATABASE_URL` + `NODE_ENV=test`, then stops Postgres and deletes the data dir.
   - `TEST_DATABASE_URL` (e.g. CI) uses an existing database instead — its name **must contain "test"** (tables get truncated).
-- `tests/unit/` — no database: `verifyMetaSignature`, `aiService` keyword/no-key fallbacks, `slotService` (timezones, closed days, lead time, limits).
+- `tests/unit/` — no database: `verifyMetaSignature`, `aiService` keyword/no-key fallbacks, `slotService` (timezones, closed days, lead time, limits), `geo` (Haversine, radius config, boundary).
+- `tests/integration/geofence.test.js` — server with `BUSINESS_LAT/LNG` set: location request, typed text rejected, ~10 km rejected + recorded, ~2 km confirmed + admin map link. `TEST_ENV` clears `BUSINESS_LAT/LNG` so other tests never inherit geofencing from `.env`.
 - `tests/integration/` — real Postgres: models, `aiService` (OpenAI path), end-to-end (spawn real `server.js`): `webhook.test.js`, `webhookAi.test.js`, `bookingFlow.test.js` (chat booking by taps/typing/location, saved address, invalid input, stop/menu/expiry, duplicate confirm, reschedule, tracking), `bookingsApi.test.js` (intake, idempotency, PATCH status).
 - `tests/helpers/`:
   - `db.js` — refuses to load unless `DATABASE_URL` db name contains "test"; `resetDb()` truncates all tables (call in `before`; add new tables to its TRUNCATE), `createBusiness()`, `closeDb()` (call in `after`).
@@ -77,6 +78,8 @@ src/services/replyService.js           replyText/replyButtons/replyList (send + 
 src/services/notificationService.js    alertAdminNewBooking (template), notifyCustomerStatus (template or text)
 src/services/bookingFlow.js            Chat flows (booking, reschedule), welcome menu, bookingRef
 src/services/slotService.js            listSlots / findSlot in TIMEZONE (no date library)
+src/services/serviceAreaService.js     Geofencing side effects: recordRejectedRequest, notifyAdminGeofencedBooking
+src/utils/geo.js                       haversineKm, parseCoordinates, getServiceArea (env), checkServiceArea, mapsLink
 src/services/aiService.js              detectIntent, generateReply, keywordIntent (fallback)
 src/controllers/webhookController.js   verifyWebhook (GET), handleIncomingMessage (POST): parsing, routing, intents
 src/controllers/bookingController.js   createNewBooking (POST), updateStatus (PATCH)
@@ -119,8 +122,12 @@ tests/, .github/workflows/ci.yml       See Tests / CI
 
 ## Chat flows (`bookingFlow.js`)
 
-- **Booking** steps (session `flow=booking`): `service` (list `svc_<id>`) → `slot` (list `slot_YYYY-MM-DD_HHMM`) → `address_choice` (buttons `addr_saved`/`addr_new`, only if a previous booking has an address) or `address` (text ≥ 10 chars or shared location → "name, address (maps link)") → `name` (skipped if known; 2–60 chars) → `notes` (button `notes_skip` or text ≤ 500) → `confirm` (buttons `confirm_yes` / `confirm_restart` / `confirm_no`).
+- **Booking** steps (session `flow=booking`): `service` (list `svc_<id>`) → `location` (**geofencing**, only when `BUSINESS_LAT`/`BUSINESS_LNG` are valid) → `slot` (list `slot_YYYY-MM-DD_HHMM`) → `address_choice` (buttons `addr_saved`/`addr_new`, only if a previous booking has an address) or `address` (text ≥ 10 chars or shared location → "name, address (maps link)") → `name` (skipped if known; 2–60 chars) → `notes` (button `notes_skip` or text ≤ 500) → `confirm` (buttons `confirm_yes` / `confirm_restart` / `confirm_no`).
   - Confirm: re-checks slot still offered, needs `DEFAULT_BUSINESS_ID`, `createBooking(... source 'whatsapp', status 'Confirmed')`, clears session, confirmation text with ref `#<first 8 of id>`, `alertAdminNewBooking`.
+- **Geofencing** (`location` step): `sendLocationRequest` text; only a native WhatsApp location is accepted (typed text → re-ask, counts as a wrong answer). Haversine distance to the store:
+  - `> MAX_DELIVERY_RADIUS_KM` → session cleared, exact message "Sorry, your location is outside our {radius}km service radius. We cannot process this booking.", request saved as booking `status Cancelled`, `booking_state 'rejected'` with coordinates + distance (skipped if no `DEFAULT_BUSINESS_ID`).
+  - `<=` radius → `data.geo` kept; address step asks only house/flat/landmark; summary shows distance; confirmed booking saved with `latitude/longitude/distance_km` + `booking_state 'confirmed'`; admin gets the template alert **and** a text with name, phone, service, slot, distance, Google Maps link (`https://www.google.com/maps/search/?api=1&query=LAT,LNG`). Admin is notified at confirmation (name/slot known then), not when the location is shared.
+  - Location shared outside any flow → guidance reply ("send *book*").
 - **Reschedule** (`flow=reschedule`, `data.bookingId`): `slot` → `updateBookingSchedule` → confirmation + admin text.
 - Typed answers work everywhere: option number ("2"), option title, yes/no words. Wrong answer → re-ask; 3 wrong → session cleared.
 - Inside a flow `stop|exit|quit|abort|cancel` ends the flow (does **not** cancel existing bookings); `menu` leaves it.
@@ -147,7 +154,7 @@ Validate → 400 · business from body or `DEFAULT_BUSINESS_ID` · idempotent wi
 ## Database (`src/models/schema.sql`)
 
 - `businesses(id, name, whatsapp_number unique, created_at)`
-- `bookings(id, business_id, client_phone, client_name, service_type, status default 'Pending', pickup_address, scheduled_time, external_id, notes, source 'api'|'whatsapp', created_at, updated_at)`; `UNIQUE (business_id, external_id)`
+- `bookings(id, business_id, client_phone, client_name, service_type, status default 'Pending', pickup_address, scheduled_time, external_id, notes, source 'api'|'whatsapp', latitude DECIMAL(9,6), longitude DECIMAL(9,6), distance_km DECIMAL(7,2), booking_state default 'pending' ('awaiting_location'|'confirmed'|'rejected'), created_at, updated_at)` — pg returns DECIMAL as strings; `UNIQUE (business_id, external_id)`
 - `messages(id, booking_id?, business_id?, client_phone, direction, content, intent, created_at)` — intents: AI intents + `handoff`, `menu`, `booking_flow`, `status_update`, `unsupported`; taps logged as `[tap] Title`, locations `[location] lat,long`, templates `[template:name]`
 - `webhook_events(wa_message_id PK, status, attempts, last_error, created_at, updated_at)`
 - `conversation_sessions(client_phone PK, flow, step, data jsonb, updated_at)`
@@ -171,6 +178,8 @@ Validate → 400 · business from body or `DEFAULT_BUSINESS_ID` · idempotent wi
 | `TEMPLATE_BOOKING_CANCELLED` | no (`booking_cancelled`) | Cancel confirmation template |
 | `TEMPLATE_ORDER_STATUS` | no (text) | Status update template "Hi {{1}}, {{2}}" |
 | `TIMEZONE` | no (UTC) | Pickup slots + dates in messages |
+| `BUSINESS_LAT` / `BUSINESS_LNG` | no (geofencing off) | Store location, decimal degrees; both valid → location check in booking flow |
+| `MAX_DELIVERY_RADIUS_KM` | no (5) | Service radius for geofencing |
 | `DB_POOL_MAX` | no (10) | Pool size |
 | `LOCAL_DB_PORT` | no (5433) | `db:local` port |
 | `WHATSAPP_API_BASE_URL` | no | Graph API host override — tests only |
