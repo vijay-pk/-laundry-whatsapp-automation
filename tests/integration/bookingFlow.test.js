@@ -176,6 +176,71 @@ describe('WhatsApp chat flows', () => {
     });
   });
 
+  describe('duplicate bookings', () => {
+    // Book `serviceRow` at the first slot up to the summary (returning customer: saved address + name).
+    const toSummary = async (phone, serviceRow) => {
+      await text(phone, 'book');
+      const [slots] = await pick(phone, serviceRow);
+      await pick(phone, rowIds(slots)[0]);
+      await tap(phone, 'addr_saved');
+      return tap(phone, 'notes_skip');
+    };
+    const existingBooking = (phone, extra = {}) =>
+      createBooking(business.id, {
+        clientPhone: phone, clientName: 'Nisha', serviceType: 'Ironing only', pickupAddress: '7 Residency Road, Bengaluru',
+        scheduledTime: listSlots()[0].start, status: 'Confirmed', ...extra,
+      });
+
+    it('asks before booking the same service and time again: keep, then book another', async () => {
+      const phone = '919500000050';
+      const existing = await existingBooking(phone);
+
+      await toSummary(phone, 'svc_ironing');
+      const [question] = await tap(phone, 'confirm_yes');
+      assert.match(question.interactive.body.text, new RegExp(`already have order #${existing.id.slice(0, 8).toUpperCase()} for Ironing only`));
+      assert.deepEqual(buttonIds(question), ['dup_keep', 'dup_new']);
+      assert.equal((await sessionFor(phone)).step, 'duplicate');
+
+      const [kept] = await tap(phone, 'dup_keep');
+      assert.match(kept.text.body, /no new booking/);
+      assert.equal((await bookingsFor(phone)).length, 1);
+      assert.equal(await sessionFor(phone), undefined);
+
+      await toSummary(phone, 'svc_ironing');
+      await text(phone, 'yes');
+      const [wrong] = await text(phone, 'maybe');
+      assert.match(wrong.interactive.body.text, /Please tap \*Keep existing\*/);
+      const [confirmation] = await text(phone, '2');
+      assert.match(confirmation.text.body, /Booking confirmed/);
+      assert.equal((await bookingsFor(phone)).length, 2);
+    });
+
+    it('does not ask for a different service, or when the old order is closed', async () => {
+      const phone = '919500000051';
+      const existing = await existingBooking(phone);
+
+      await toSummary(phone, 'svc_wash_fold');
+      const [confirmation] = await tap(phone, 'confirm_yes');
+      assert.match(confirmation.text.body, /Booking confirmed/);
+
+      await query(`UPDATE bookings SET status = 'Cancelled' WHERE id = $1`, [existing.id]);
+      await toSummary(phone, 'svc_ironing');
+      const [again] = await tap(phone, 'confirm_yes');
+      assert.match(again.text.body, /Booking confirmed/);
+    });
+
+    it('points to the payment link of an unpaid online order', async () => {
+      const phone = '919500000052';
+      await existingBooking(phone, { status: 'Pending', paymentMethod: 'razorpay', paymentStatus: 'pending', paymentToken: 'a'.repeat(64) });
+
+      await toSummary(phone, 'svc_ironing');
+      const [question] = await tap(phone, 'confirm_yes');
+      assert.match(question.interactive.body.text, /waiting for payment: \/pay\/a{64}/);
+      const [kept] = await tap(phone, 'dup_keep');
+      assert.match(kept.text.body, /\/pay\/a{64}/);
+    });
+  });
+
   describe('booking by typing', () => {
     const phone = '919500000020';
 
@@ -316,6 +381,22 @@ describe('WhatsApp chat flows', () => {
       const adminNotes = graph.sentTo(TEST_ENV.ADMIN_PHONE).slice(adminBefore);
       assert.equal(adminNotes.length, 1);
       assert.match(adminNotes[0].body.text.body, /Pickup rescheduled/);
+    });
+
+    it('does not move a pickup that was picked up while the customer was choosing', async () => {
+      const latePhone = '919500000042';
+      const booking = await createBooking(business.id, {
+        clientPhone: latePhone, status: 'Confirmed', scheduledTime: '2026-01-01T04:30:00Z',
+      });
+
+      const [slots] = await text(latePhone, 'reschedule');
+      await query(`UPDATE bookings SET status = 'Picked Up' WHERE id = $1`, [booking.id]);
+      const [reply] = await pick(latePhone, rowIds(slots).at(-1));
+
+      assert.match(reply.text.body, /picked up now, so the pickup time can't be changed/);
+      const { rows } = await query('SELECT scheduled_time FROM bookings WHERE id = $1', [booking.id]);
+      assert.equal(new Date(rows[0].scheduled_time).toISOString(), '2026-01-01T04:30:00.000Z');
+      assert.equal(await sessionFor(latePhone), undefined);
     });
   });
 });

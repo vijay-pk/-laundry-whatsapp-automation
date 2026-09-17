@@ -7,7 +7,7 @@
 
 const { sendTemplateMessage, sendTextMessage } = require('./whatsappService');
 const { safeLog } = require('./replyService');
-const { statusMessage } = require('../config/orderStatuses');
+const { bookingRef, statusMessage } = require('../config/orderStatuses');
 const { formatDateTime } = require('../utils/formatDate');
 
 // Approved template, assumed body: "New booking: {{1}} booked {{2}} for {{3}}."
@@ -40,13 +40,14 @@ const alertAdminNewBooking = async (booking) => {
 };
 
 /**
- * Tell the customer their order's current status.
+ * Tell the customer their order's current status, prefixed with the order ref
+ * (customers with several orders know which one changed).
  * Uses TEMPLATE_ORDER_STATUS (body "Hi {{1}}, {{2}}") when set, so it arrives even
  * outside the 24-hour window; otherwise plain text.
  * @returns {Promise<{sent: boolean, channel: 'template'|'text', messageId?: string, error?: string}>}
  */
 const notifyCustomerStatus = async (booking) => {
-  const text = statusMessage(booking, formatDateTime);
+  const text = `Order #${bookingRef(booking)}: ${statusMessage(booking, formatDateTime)}`;
   const template = process.env.TEMPLATE_ORDER_STATUS;
   const channel = template ? 'template' : 'text';
 

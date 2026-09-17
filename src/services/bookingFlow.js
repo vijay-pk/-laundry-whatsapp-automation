@@ -1,8 +1,10 @@
 /**
  * src/services/bookingFlow.js
  * Multi-step WhatsApp chat flows, driven by conversation_sessions:
- *   booking:    service -> [location check] -> pickup slot -> address -> name -> instructions -> confirm
- *               (location check only when BUSINESS_LAT/BUSINESS_LNG are set: geofencing)
+ *   booking:    service -> [quantity] -> [location check] -> pickup slot -> address -> name -> instructions -> confirm
+ *               -> [duplicate: same service + time already open]
+ *               (quantity only when the business has payment enabled: bookingCheckout;
+ *                location check only when BUSINESS_LAT/BUSINESS_LNG are set: geofencing)
  *   reschedule: pickup slot -> update booking
  *
  * Customers can tap buttons/lists or type (numbers or text). "stop" ends a flow,
@@ -13,12 +15,15 @@ const { businessKnowledge } = require('../config/businessKnowledge');
 const { listSlots, findSlot } = require('./slotService');
 const { replyText, replyButtons, replyList, notifyAdmin, maskPhone, safeLog } = require('./replyService');
 const { sendLocationRequest, locationRequestText } = require('./whatsappService');
-const { alertAdminNewBooking } = require('./notificationService');
 const { saveSession, clearSession } = require('../models/sessionModel');
-const { createBooking, updateBookingSchedule } = require('../models/bookingModel');
+const { updateBookingSchedule, getBookingById } = require('../models/bookingModel');
+const checkout = require('./bookingCheckout');
+const { getPaymentOptions } = require('./paymentService');
 const { formatDateTime } = require('../utils/formatDate');
-const { getServiceArea, checkServiceArea, parseCoordinates } = require('../utils/geo');
-const { recordRejectedRequest, notifyAdminGeofencedBooking } = require('./serviceAreaService');
+const { bookingRef, CHANGEABLE_STATUSES } = require('../config/orderStatuses');
+const { getServiceArea } = require('../utils/geo');
+const { readCustomerLocation, decideServiceArea, recordRejectedRequest } = require('./serviceAreaService');
+const duplicateGuard = require('./duplicateGuard');
 
 // ---------------------------------------------------------------------------
 // 1. Configuration
@@ -32,6 +37,10 @@ const MAX_RETRIES = 3;
 const MIN_ADDRESS_LENGTH = 10;
 const MAX_ADDRESS_LENGTH = 300;
 const MAX_NOTES_LENGTH = 500;
+const LOCATION_HINTS = {
+  unreadable_link: "I couldn't read a location from that link. Please share your location using the 📎 attachment icon.",
+  not_location: 'Please share your location using the 📎 attachment icon, or paste a Google Maps link.',
+};
 
 // Inside a flow, "cancel" means "stop this flow", not "cancel my existing booking".
 const STOP_WORDS = /^(stop|exit|quit|abort|cancel)$/i;
@@ -39,9 +48,6 @@ const MENU_WORDS = /^(menu|restart|start over|main menu)$/i;
 const YES_WORDS = /^(yes|y|confirm|ok|okay|sure)$/i;
 const NO_WORDS = /^(no|n|cancel|discard)$/i;
 const SKIP_WORDS = /^(no|none|skip|nothing|na|n\/a|nope)$/i;
-
-// Short reference customers and staff can quote.
-const bookingRef = (booking) => booking.id.slice(0, 8).toUpperCase();
 
 const serviceOptions = () =>
   businessKnowledge.services.map((s) => ({
@@ -183,18 +189,18 @@ const bookingSummary = (data) => {
 
 const askConfirm = async (from, data) => {
   await saveSession(from, FLOW.BOOKING, 'confirm', data);
-  return replyButtons(
-    from,
-    null,
-    bookingSummary(data),
-    [
-      { id: 'confirm_yes', title: 'Confirm' },
-      { id: 'confirm_restart', title: 'Start over' },
-      { id: 'confirm_no', title: 'Cancel' },
-    ],
-    FLOW_INTENT
-  );
+  const quote = await checkout.quoteForData(data); // payment lines/buttons only when payment applies
+  const body = [bookingSummary(data), ...checkout.paymentSummaryLines(quote, data)].join('\n');
+  return replyButtons(from, null, body, checkout.confirmButtons(quote), FLOW_INTENT);
 };
+
+const askQuantity = async (from, data, prefix = '') => {
+  await saveSession(from, FLOW.BOOKING, 'quantity', data);
+  return replyText(from, null, `${prefix}${checkout.quantityPrompt(businessKnowledge.services.find((s) => s.id === data.serviceId))}`, FLOW_INTENT);
+};
+
+// After the service (and quantity): geofencing check or straight to pickup slots.
+const afterService = (from, data) => (getServiceArea().enabled ? askLocation(from, data) : askSlot(from, FLOW.BOOKING, data));
 
 // Count a wrong answer; after MAX_RETRIES give up so customers are never stuck.
 const invalid = async (ctx, message, reask) => {
@@ -222,42 +228,54 @@ const bookingSteps = {
     data.serviceId = option.service.id;
     data.retries = 0;
 
-    // Geofencing enabled -> verify the pickup location before offering slots.
-    if (getServiceArea().enabled) return askLocation(from, data);
-    return askSlot(from, FLOW.BOOKING, data);
+    // Payment enabled -> ask the quantity so the total can be calculated.
+    const payment = await getPaymentOptions(process.env.DEFAULT_BUSINESS_ID);
+    if (payment.required && option.service.unitPrice) return askQuantity(from, data);
+    return afterService(from, data);
+  },
+
+  quantity: async (ctx) => {
+    const { from, input, data } = ctx;
+    const service = businessKnowledge.services.find((s) => s.id === data.serviceId);
+    const quantity = input.type === 'text' ? checkout.parseQuantity(input.text, service.unit) : null;
+    if (quantity === null) return invalid(ctx, checkout.quantityError(service.unit), (p) => askQuantity(from, data, p));
+
+    data.quantity = quantity;
+    data.retries = 0;
+    return afterService(from, data);
   },
 
   // Geofencing step: customer must share a native WhatsApp location (not text).
   location: async (ctx) => {
     const { from, input, data } = ctx;
 
-    const coords = input.type === 'location' ? parseCoordinates(input.location?.latitude, input.location?.longitude) : null;
-    if (!coords) {
-      return invalid(ctx, 'Please share your location using the 📎 attachment icon (typed addresses can’t be checked).', (p) =>
-        askLocation(from, data, p)
-      );
-    }
+    // WhatsApp location attachment, or a pasted Google Maps link (resolved + geocoded if needed)
+    const { location, error } = await readCustomerLocation(input);
+    if (!location) return invalid(ctx, LOCATION_HINTS[error], (p) => askLocation(from, data, p));
 
     const area = getServiceArea();
     data.retries = 0;
     if (!area.enabled) return askSlot(from, FLOW.BOOKING, data); // config removed mid-conversation
+    const { decision, distanceKm, radiusKm } = decideServiceArea(location, area);
+    const service = businessKnowledge.services.find((sv) => sv.id === data.serviceId);
+    console.log(`[flow] Location check for ${maskPhone(from)}: ${distanceKm} km (${location.precision}, limit ${radiusKm} km) -> ${decision}`);
 
-    const { distanceKm, withinRadius, radiusKm } = checkServiceArea(coords.latitude, coords.longitude, area);
-    const service = businessKnowledge.services.find((s) => s.id === data.serviceId);
-    console.log(`[flow] Location check for ${maskPhone(from)}: ${distanceKm} km (limit ${radiusKm} km) -> ${withinRadius ? 'inside' : 'outside'}`);
+    // Place link too imprecise to decide (near the boundary): ask for the exact location.
+    if (decision === 'uncertain') {
+      await saveSession(from, FLOW.BOOKING, 'location', data);
+      return replyText(from, null, `That place is near the edge of our ${radiusKm}km service radius, so we need your exact spot. Please share your location using 📎 → Location.`, FLOW_INTENT);
+    }
 
     // Outside the radius: end the flow, record the request for reporting, tell the customer.
-    if (!withinRadius) {
+    const { latitude, longitude } = location;
+    if (decision === 'outside') {
       await clearSession(from);
-      await recordRejectedRequest({
-        from, name: data.name, serviceName: service?.name ?? data.serviceId, distanceKm, ...coords,
-      });
-      const rejection = `Sorry, your location is outside our ${radiusKm}km service radius. We cannot process this booking.`;
-      return replyText(from, null, rejection, FLOW_INTENT);
+      await recordRejectedRequest({ from, name: data.name, serviceName: service?.name ?? data.serviceId, distanceKm, latitude, longitude });
+      return replyText(from, null, `Sorry, your location is outside our ${radiusKm}km service radius. We cannot process this booking.`, FLOW_INTENT);
     }
 
     // Inside the radius: keep the coordinates for the booking and continue.
-    data.geo = { latitude: coords.latitude, longitude: coords.longitude, distanceKm };
+    data.geo = { latitude, longitude, distanceKm, precision: location.precision, link: location.link ?? null };
     return askSlot(from, FLOW.BOOKING, data);
   },
 
@@ -351,60 +369,32 @@ const bookingSteps = {
       await clearSession(from);
       return replyText(from, null, 'Booking discarded. Send *Hi* whenever you want to book.', FLOW_INTENT);
     }
-    if (!(isChoice(input, 'confirm_yes') || textMatches(input, YES_WORDS))) {
-      return invalid(ctx, 'Please tap *Confirm* to book, or *Cancel*.', () => askConfirm(from, data));
+    const choice = input.type === 'choice' ? input.id : textMatches(input, YES_WORDS) ? 'confirm_yes' : null;
+    const quote = await checkout.quoteForData(data); // re-read: settings may have changed since the summary
+    const method = choice ? checkout.resolveMethod(choice, quote) : null;
+    if (!method) {
+      return invalid(ctx, 'Please tap one of the buttons to confirm, or *Cancel*.', () => askConfirm(from, data));
     }
 
     if (!findSlot(data.slot.id)) {
       return askSlot(from, FLOW.BOOKING, data, 'Sorry, your pickup time is no longer available. Please choose another.\n\n');
     }
 
-    const businessId = process.env.DEFAULT_BUSINESS_ID;
-    if (!businessId) {
+    if (!process.env.DEFAULT_BUSINESS_ID) {
       console.error('[flow] DEFAULT_BUSINESS_ID not set; cannot save chat booking');
       await clearSession(from);
       await replyText(from, null, 'Sorry, we could not save your booking right now. Our team will contact you.', FLOW_INTENT);
       return notifyAdmin(['Chat booking failed: DEFAULT_BUSINESS_ID not configured.', `Client: +${from}`]).catch(() => {});
     }
 
-    const service = businessKnowledge.services.find((s) => s.id === data.serviceId);
-    const booking = await createBooking(businessId, {
-      clientPhone: from,
-      clientName: data.name,
-      serviceType: service?.name ?? data.serviceId,
-      pickupAddress: data.address,
-      scheduledTime: data.slot.start,
-      notes: data.notes,
-      source: 'whatsapp',
-      status: 'Confirmed',
-      bookingState: 'confirmed',
-      latitude: data.geo?.latitude,
-      longitude: data.geo?.longitude,
-      distanceKm: data.geo?.distanceKm,
-    });
+    // Same service + pickup time already booked and open: ask before saving a second one.
+    if (await duplicateGuard.askIfDuplicate({ from, data, choice })) return;
 
     await clearSession(from);
-    console.log(`[flow] Chat booking ${booking.id} created for ${maskPhone(from)}`);
-
-    await replyText(
-      from,
-      booking,
-      [
-        '✅ Booking confirmed!',
-        '',
-        `Ref: #${bookingRef(booking)}`,
-        `${booking.service_type} pickup: ${data.slot.title} (${data.slot.description})`,
-        '',
-        'Reply *track* anytime to check your order, or *reschedule* / *cancel* to change it.',
-      ].join('\n'),
-      FLOW_INTENT
-    );
-
-    await alertAdminNewBooking(booking);
-
-    // Geofenced booking: send the admin the customer's details and a map link to the pickup point.
-    if (data.geo) await notifyAdminGeofencedBooking(booking, data);
+    return checkout.finalizeBooking({ from, data, method, quote });
   },
+
+  duplicate: (ctx) => duplicateGuard.handleAnswer(ctx, { confirm: bookingSteps.confirm, invalid }),
 };
 
 const rescheduleSteps = {
@@ -417,9 +407,17 @@ const rescheduleSteps = {
       return askSlot(from, FLOW.RESCHEDULE, data, 'Sorry, that time is no longer available.\n\n');
     }
 
-    const booking = await updateBookingSchedule(data.bookingId, option.start);
+    // Re-check: the order may have been picked up or cancelled while the customer was choosing.
+    const current = await getBookingById(data.bookingId);
     await clearSession(from);
+    if (!current || current.client_phone !== from) {
+      return replyText(from, null, "Sorry, we couldn't find that booking anymore.", FLOW_INTENT);
+    }
+    if (!CHANGEABLE_STATUSES.includes(current.status)) {
+      return replyText(from, current, `Order #${bookingRef(current)} is ${current.status.toLowerCase()} now, so the pickup time can't be changed here. Our team will contact you if needed.`, FLOW_INTENT);
+    }
 
+    const booking = await updateBookingSchedule(data.bookingId, option.start);
     if (!booking) {
       return replyText(from, null, "Sorry, we couldn't find that booking anymore.", FLOW_INTENT);
     }
@@ -434,6 +432,11 @@ const rescheduleSteps = {
 };
 
 const STEPS = { [FLOW.BOOKING]: bookingSteps, [FLOW.RESCHEDULE]: rescheduleSteps };
+
+// Other services add their own session flows (e.g. orderActions: choosing one of several orders).
+const registerFlow = (flow, steps) => {
+  STEPS[flow] = steps;
+};
 
 // ---------------------------------------------------------------------------
 // 5. Public API
@@ -491,4 +494,8 @@ module.exports = {
   startBooking,
   startReschedule,
   handleFlowMessage,
+  registerFlow,
+  pickOption,
+  textMatches,
+  invalid,
 };

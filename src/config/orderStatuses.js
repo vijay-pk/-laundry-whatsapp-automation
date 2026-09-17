@@ -24,6 +24,16 @@ const CHANGEABLE_STATUSES = ['Pending', 'Confirmed', 'Out for Pickup'];
 // Finished orders: not "active" for tracking or changes.
 const CLOSED_STATUSES = ['Delivered', 'Cancelled'];
 
+// Short order reference shown to customers and staff: first 8 characters of the id.
+const bookingRef = (booking) => booking.id.slice(0, 8).toUpperCase();
+
+// Online booking (Razorpay link or WhatsApp Pay) still waiting for its payment:
+// only a verified payment confirms it.
+const awaitingOnlinePayment = (booking) =>
+  ['pending', 'failed'].includes(booking.payment_status) &&
+  booking.status !== 'Cancelled' &&
+  ((booking.payment_method === 'razorpay' && Boolean(booking.payment_token)) || booking.payment_method === 'whatsapp_pay');
+
 const isValidStatus = (status) => STATUS_NAMES.includes(status);
 
 /**
@@ -42,6 +52,8 @@ module.exports = {
   STATUS_NAMES,
   CHANGEABLE_STATUSES,
   CLOSED_STATUSES,
+  bookingRef,
+  awaitingOnlinePayment,
   isValidStatus,
   statusMessage,
 };

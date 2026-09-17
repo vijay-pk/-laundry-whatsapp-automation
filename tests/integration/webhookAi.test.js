@@ -9,7 +9,7 @@ const assert = require('node:assert/strict');
 const { query, resetDb, createBusiness, closeDb } = require('../helpers/db');
 const { startMockGraph } = require('../helpers/mockGraph');
 const { startMockOpenAI, json, httpError } = require('../helpers/mockOpenAI');
-const { TEST_ENV, startServer, webhookPayload, textMessage, waitFor } = require('../helpers/server');
+const { TEST_ENV, startServer, webhookPayload, textMessage, tapMessage, waitFor } = require('../helpers/server');
 const { createBooking } = require('../../src/models/bookingModel');
 
 const waitForDone = (id) =>
@@ -99,6 +99,7 @@ describe('WhatsApp AI replies (end-to-end)', () => {
 
     await server.postWebhook(webhookPayload([textMessage('wamid.ai.learn1', '919400000003', 'Do you wash curtains?')]));
     await waitForDone('wamid.ai.learn1');
+    await query(`UPDATE messages SET approved_at = NOW() WHERE client_phone = '919400000003' AND direction = 'outbound'`); // staff approval
 
     await server.postWebhook(webhookPayload([textMessage('wamid.ai.learn2', '919400000004', 'can you wash my curtains')]));
     await waitForDone('wamid.ai.learn2');
@@ -137,10 +138,14 @@ describe('WhatsApp AI replies (end-to-end)', () => {
 
     await server.postWebhook(webhookPayload([textMessage('wamid.ai.cancel', phone, "don't come tomorrow, not needed anymore")]));
     assert.equal((await waitForDone('wamid.ai.cancel')).status, 'done');
+    assert.match(graph.sentTo(phone)[0].body.interactive.body.text, /Cancel order #/);
+
+    await server.postWebhook(webhookPayload([tapMessage('wamid.ai.cancel.yes', phone, `cxl_yes_${booking.id}`)]));
+    assert.equal((await waitForDone('wamid.ai.cancel.yes')).status, 'done');
 
     const { rows } = await query('SELECT status FROM bookings WHERE id = $1', [booking.id]);
     assert.equal(rows[0].status, 'Cancelled');
-    assert.equal(graph.sentTo(phone)[0].body.template.name, TEST_ENV.TEMPLATE_BOOKING_CANCELLED);
+    assert.equal(graph.sentTo(phone)[1].body.template.name, TEST_ENV.TEMPLATE_BOOKING_CANCELLED);
     assert.equal(openai.ofKind('reply').length, 0, 'no AI reply for actions');
   });
 

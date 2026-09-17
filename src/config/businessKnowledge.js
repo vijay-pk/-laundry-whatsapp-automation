@@ -20,13 +20,18 @@ const businessKnowledge = {
 
   // Shown as the booking menu. `id` must stay stable (stored in chat sessions);
   // `name` max 24 characters (WhatsApp list row limit).
-  // [EDIT] Prices are examples. Set real prices or remove lines.
+  // `unit` ('kg' | 'piece') + `unitPrice` (rupees, number) calculate the booking total when
+  // online payment is enabled; `price` is the text customers see.
+  // [EDIT] Prices are examples. Keep `price` text and `unitPrice` in sync.
   services: [
-    { id: 'wash_fold', name: 'Wash & Fold', price: '[EDIT] ₹60 per kg', turnaround: '24-48 hours' },
-    { id: 'wash_iron', name: 'Wash & Iron', price: '[EDIT] ₹90 per kg', turnaround: '48 hours' },
-    { id: 'ironing', name: 'Ironing only', price: '[EDIT] ₹15 per piece', turnaround: '24 hours' },
-    { id: 'dry_clean', name: 'Dry Cleaning', price: '[EDIT] from ₹150 per piece', turnaround: '3-4 days' },
+    { id: 'wash_fold', name: 'Wash & Fold', price: '[EDIT] ₹50 per kg', unit: 'kg', unitPrice: 50, turnaround: '24-48 hours' },
+    { id: 'wash_iron', name: 'Wash & Iron', price: '[EDIT] ₹90 per kg', unit: 'kg', unitPrice: 90, turnaround: '48 hours' },
+    { id: 'ironing', name: 'Ironing only', price: '[EDIT] ₹15 per piece', unit: 'piece', unitPrice: 15, turnaround: '24 hours' },
+    { id: 'dry_clean', name: 'Dry Cleaning', price: '[EDIT] ₹150 per piece', unit: 'piece', unitPrice: 150, turnaround: '3-4 days' },
   ],
+
+  // Quantity customers can enter per booking (estimate; staff confirm at pickup).
+  quantityLimits: { kg: { min: 1, max: 50 }, piece: { min: 1, max: 100 } },
 
   // Pickup windows offered in chat (24h "HH:MM", in the TIMEZONE env timezone).
   pickupSlots: [

@@ -108,6 +108,69 @@ describe('bookingModel', () => {
     });
   });
 
+  describe('getActiveBookingsForClient', () => {
+    it('returns open orders newest first, without delivered or cancelled ones', async () => {
+      const phone = '919000000012';
+      const older = await bookings.createBooking(business.id, { clientPhone: phone, status: 'Processing' });
+      await query(`UPDATE bookings SET created_at = NOW() - INTERVAL '1 hour' WHERE id = $1`, [older.id]);
+      const newer = await bookings.createBooking(business.id, { clientPhone: phone, status: 'Confirmed' });
+      await bookings.createBooking(business.id, { clientPhone: phone, status: 'Delivered' });
+      await bookings.createBooking(business.id, { clientPhone: phone, status: 'Cancelled' });
+      await bookings.createBooking(otherBusiness.id, { clientPhone: phone });
+
+      assert.deepEqual((await bookings.getActiveBookingsForClient(phone, business.id)).map((b) => b.id), [newer.id, older.id]);
+      assert.equal((await bookings.getActiveBookingsForClient(phone)).length, 3, 'all businesses without businessId');
+      assert.equal((await bookings.getActiveBookingsForClient(phone, null, 1)).length, 1);
+      assert.deepEqual(await bookings.getActiveBookingsForClient('919999999998'), []);
+    });
+  });
+
+  describe('geofence-rejected requests', () => {
+    it('are not returned by customer lookups', async () => {
+      const phone = '919000000016';
+      const rejected = await bookings.createBooking(business.id, {
+        clientPhone: phone, serviceType: 'Ironing only', scheduledTime: '2026-09-20T09:30:00.000Z', status: 'Pending', bookingState: 'rejected',
+      });
+
+      assert.equal(await bookings.getLatestBookingForClient(phone), null);
+      assert.equal(await bookings.getLatestBookingForClient(phone, business.id), null);
+      assert.deepEqual(await bookings.getActiveBookingsForClient(phone), []);
+      assert.equal(await bookings.findClientBookingByRef(phone, rejected.id.slice(0, 8)), null);
+      assert.equal(await bookings.findDuplicateBooking(phone, 'Ironing only', '2026-09-20T09:30:00.000Z'), null);
+    });
+  });
+
+  describe('findClientBookingByRef', () => {
+    it("finds the client's booking by the first 8 characters of its id, in any case", async () => {
+      const phone = '919000000013';
+      const b = await bookings.createBooking(business.id, { clientPhone: phone });
+      const ref = b.id.slice(0, 8);
+
+      assert.equal((await bookings.findClientBookingByRef(phone, ref.toUpperCase())).id, b.id);
+      assert.equal((await bookings.findClientBookingByRef(phone, ref, business.id)).id, b.id);
+      assert.equal(await bookings.findClientBookingByRef(phone, ref, otherBusiness.id), null);
+    });
+
+    it("never returns another client's booking or matches malformed refs", async () => {
+      const b = await bookings.createBooking(business.id, { clientPhone: '919000000014' });
+      assert.equal(await bookings.findClientBookingByRef('919000000015', b.id.slice(0, 8)), null);
+      for (const ref of ['%', '%%%%%%%%', b.id.slice(0, 7), `${b.id.slice(0, 7)}_`, b.id, null]) {
+        assert.equal(await bookings.findClientBookingByRef('919000000014', ref), null, String(ref));
+      }
+    });
+  });
+
+  describe('updateBookingStatus onlyFromStatuses', () => {
+    it('updates only while the current status is allowed', async () => {
+      const b = await bookings.createBooking(business.id, { clientPhone: '919000000017', status: 'Picked Up' });
+      assert.equal(await bookings.updateBookingStatus(b.id, 'Cancelled', { onlyFromStatuses: ['Pending', 'Confirmed'] }), null);
+      assert.equal((await bookings.getBookingById(b.id)).status, 'Picked Up');
+
+      const ok = await bookings.updateBookingStatus(b.id, 'Cancelled', { onlyFromStatuses: ['Picked Up'] });
+      assert.equal(ok.status, 'Cancelled');
+    });
+  });
+
   describe('updateBookingStatus', () => {
     it('updates and returns the booking', async () => {
       const b = await bookings.createBooking(business.id, { clientPhone: '919000000020' });

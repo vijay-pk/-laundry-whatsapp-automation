@@ -8,7 +8,7 @@ const assert = require('node:assert/strict');
 
 const { query, resetDb, createBusiness, closeDb } = require('../helpers/db');
 const { startMockGraph } = require('../helpers/mockGraph');
-const { TEST_ENV, startServer, webhookPayload, textMessage, waitFor, sleep } = require('../helpers/server');
+const { TEST_ENV, startServer, webhookPayload, textMessage, tapMessage, waitFor, sleep } = require('../helpers/server');
 const { createBooking } = require('../../src/models/bookingModel');
 
 const eventRow = async (id) =>
@@ -111,7 +111,9 @@ describe('POST/GET /webhook', () => {
         return row?.status === 'done' ? row : null;
       });
       assert.equal(done.attempts, 2);
-      assert.equal(graph.sentTo(phone).length, 2, 'one failed + one successful send');
+      const sent = graph.sentTo(phone);
+      assert.equal(sent.length, 3, 'failed reply + apology + successful send');
+      assert.match(sent[1].body.text.body, /something went wrong on our side/);
     });
 
     it('processes every message in a batched delivery', async () => {
@@ -127,7 +129,7 @@ describe('POST/GET /webhook', () => {
   });
 
   describe('intents', () => {
-    it('cancel: cancels the booking and sends the template once', async () => {
+    it('cancel: asks first, then cancels the booking and sends the template once', async () => {
       const phone = '919200000040';
       const booking = await createBooking(business.id, {
         clientPhone: phone, clientName: 'Asha', serviceType: 'Dry Cleaning',
@@ -139,10 +141,21 @@ describe('POST/GET /webhook', () => {
       assert.equal((await waitForEventStatus('wamid.cancel')).status, 'done');
       await sleep(300);
 
+      const question = graph.sentTo(phone);
+      assert.equal(question.length, 1, 'one confirmation question for a duplicate delivery');
+      assert.deepEqual(question[0].body.interactive.action.buttons.map((b) => b.reply.id), [`cxl_yes_${booking.id}`, `cxl_no_${booking.id}`]);
+      assert.equal((await query('SELECT status FROM bookings WHERE id = $1', [booking.id])).rows[0].status, 'Pending', 'not cancelled before the answer');
+
+      const yes = webhookPayload([tapMessage('wamid.cancel.yes', phone, `cxl_yes_${booking.id}`)]);
+      await server.postWebhook(yes);
+      await server.postWebhook(yes);
+      assert.equal((await waitForEventStatus('wamid.cancel.yes')).status, 'done');
+      await sleep(300);
+
       const { rows } = await query('SELECT status FROM bookings WHERE id = $1', [booking.id]);
       assert.equal(rows[0].status, 'Cancelled');
 
-      const sent = graph.sentTo(phone);
+      const sent = graph.sentTo(phone).slice(1);
       assert.equal(sent.length, 1);
       assert.equal(sent[0].body.type, 'template');
       assert.equal(sent[0].body.template.name, TEST_ENV.TEMPLATE_BOOKING_CANCELLED);

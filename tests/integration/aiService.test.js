@@ -137,6 +137,7 @@ describe('aiService with OpenAI', () => {
     it('includes past answers to similar questions from other customers (learning)', async () => {
       await logAt(30, 'inbound', 'Do you do dry cleaning for suits?', 'question', '919300000003');
       await logAt(29, 'outbound', 'Yes, suits are dry cleaned in 3-4 days.', 'question', '919300000003');
+      await query(`UPDATE messages SET approved_at = NOW() WHERE client_phone = '919300000003' AND direction = 'outbound'`);
 
       await ai.generateReply('dry cleaning for my suit?', '919300000004');
 
