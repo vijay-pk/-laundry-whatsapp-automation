@@ -21,17 +21,29 @@ const normalizePem = (value) => String(value).replace(/\\n/g, '\n').trim();
  */
 const LOCAL_HOSTS = new Set(['localhost', '127.0.0.1', '[::1]']);
 
+// new URL() puts the whole input (password included) into its error: never let that reach logs.
+const parseUrl = (databaseUrl) => {
+  try {
+    return new URL(databaseUrl);
+  } catch {
+    throw new Error(
+      '[db] DATABASE_URL is not a valid URL. Special characters in the password must be URL-encoded ' +
+        '(# -> %23, @ -> %40, / -> %2F, ? -> %3F, % -> %25), or use a password with only letters and digits.'
+    );
+  }
+};
+
 const pgConnectionConfig = (databaseUrl, caCert = process.env.DATABASE_CA_CERT) => {
   if (!caCert || !String(caCert).trim()) return { connectionString: databaseUrl };
   // Local Postgres (db:local, tests) has no TLS: a production CA left in .env must not force it.
-  if (LOCAL_HOSTS.has(new URL(databaseUrl).hostname)) return { connectionString: databaseUrl };
+  if (LOCAL_HOSTS.has(parseUrl(databaseUrl).hostname)) return { connectionString: databaseUrl };
 
   const ca = normalizePem(caCert);
   if (!ca.includes('-----BEGIN CERTIFICATE-----')) {
     throw new Error('[db] DATABASE_CA_CERT must be a PEM certificate (-----BEGIN CERTIFICATE-----)');
   }
 
-  const url = new URL(databaseUrl);
+  const url = parseUrl(databaseUrl);
   SSL_PARAMS.forEach((param) => url.searchParams.delete(param));
   return { connectionString: url.toString(), ssl: { ca, rejectUnauthorized: true } };
 };

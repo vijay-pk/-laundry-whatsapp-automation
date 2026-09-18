@@ -36,6 +36,15 @@ describe('pgConnectionConfig', () => {
     assert.deepEqual(pgConnectionConfig(local, PEM), { connectionString: local });
   });
 
+  it('explains an invalid URL without leaking the password', () => {
+    const bad = 'postgresql://postgres.abc:Secret#123@aws-0-ap-south-1.pooler.supabase.com:5432/postgres';
+    assert.throws(() => pgConnectionConfig(bad, PEM), (err) => {
+      assert.match(err.message, /URL-encoded/);
+      assert.doesNotMatch(err.message + JSON.stringify(err), /Secret/);
+      return true;
+    });
+  });
+
   it('rejects a value that is not a PEM certificate', () => {
     assert.throws(() => pgConnectionConfig(URL_WITH_SSL, 'not-a-cert'), /PEM certificate/);
   });
