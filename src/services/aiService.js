@@ -1,6 +1,6 @@
 /**
  * src/services/aiService.js
- * OpenAI-powered intent detection and customer replies.
+ * AI intent detection and customer replies: OpenAI, or Groq (OpenAI-compatible API).
  *
  * Replies are grounded in:
  *   1. businessKnowledge.js (source of truth)
@@ -17,7 +17,8 @@ const { getRecentConversation, findSimilarPastAnswers } = require('../models/con
 // ---------------------------------------------------------------------------
 // 1. Configuration
 // ---------------------------------------------------------------------------
-const MODEL = process.env.OPENAI_MODEL || 'gpt-4o-mini';
+const GROQ_BASE_URL = 'https://api.groq.com/openai/v1';
+const GROQ_DEFAULT_MODEL = 'openai/gpt-oss-20b';
 const REQUEST_TIMEOUT_MS = 15000;
 const HISTORY_LIMIT = 10;
 const PAST_ANSWER_LIMIT = 5;
@@ -28,19 +29,43 @@ const INTENTS = ['book', 'status', 'cancel', 'reschedule', 'confirm', 'question'
 const FALLBACK_REPLY = 'Thanks for your message! Our team will get back to you shortly.';
 
 // ---------------------------------------------------------------------------
-// 2. OpenAI client (created lazily; null when no API key is configured)
+// 2. AI client (created lazily; null when no API key is configured)
 // ---------------------------------------------------------------------------
+
+/**
+ * Which provider to call, from env:
+ *   OPENAI_API_KEY (sk-...)          -> OpenAI, model OPENAI_MODEL (default gpt-4o-mini)
+ *   GROQ_API_KEY, or a gsk_ key put in OPENAI_API_KEY -> Groq, model GROQ_MODEL (default openai/gpt-oss-20b)
+ * @returns {{ provider: 'openai'|'groq', apiKey: string, baseURL?: string, model: string } | null}
+ */
+const aiConfig = (env = process.env) => {
+  const openaiKey = String(env.OPENAI_API_KEY || '').trim();
+  const groqKey = String(env.GROQ_API_KEY || '').trim() || (openaiKey.startsWith('gsk_') ? openaiKey : '');
+
+  if (openaiKey && !openaiKey.startsWith('gsk_') && !openaiKey.startsWith('sk-replace')) {
+    return { provider: 'openai', apiKey: openaiKey, model: env.OPENAI_MODEL || 'gpt-4o-mini' };
+  }
+  if (groqKey) {
+    return { provider: 'groq', apiKey: groqKey, baseURL: env.GROQ_BASE_URL || GROQ_BASE_URL, model: env.GROQ_MODEL || GROQ_DEFAULT_MODEL };
+  }
+  return null;
+};
+
 let client;
+let model;
 
 const getClient = () => {
   if (client !== undefined) return client;
 
-  const apiKey = process.env.OPENAI_API_KEY;
-  if (!apiKey || apiKey.startsWith('sk-replace')) {
-    console.warn('[ai] OPENAI_API_KEY not set: using keyword intent detection and fallback replies');
+  const config = aiConfig();
+  if (!config) {
+    console.warn('[ai] No OPENAI_API_KEY or GROQ_API_KEY: using keyword intent detection and fallback replies');
     client = null;
   } else {
-    client = new OpenAI({ apiKey, timeout: REQUEST_TIMEOUT_MS, maxRetries: 1 });
+    // baseURL undefined -> the SDK default (or OPENAI_BASE_URL, used by tests)
+    client = new OpenAI({ apiKey: config.apiKey, baseURL: config.baseURL, timeout: REQUEST_TIMEOUT_MS, maxRetries: 1 });
+    model = config.model;
+    console.log(`[ai] Using ${config.provider} model ${model}`);
   }
   return client;
 };
@@ -48,7 +73,7 @@ const getClient = () => {
 // Ask the model for a JSON object and parse it.
 const completeJson = async (messages, temperature) => {
   const response = await getClient().chat.completions.create({
-    model: MODEL,
+    model,
     temperature,
     response_format: { type: 'json_object' },
     messages,
@@ -191,6 +216,7 @@ const generateReply = async (text, clientPhone) => {
 };
 
 module.exports = {
+  aiConfig,
   detectIntent,
   generateReply,
   keywordIntent,

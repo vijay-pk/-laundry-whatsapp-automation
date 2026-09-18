@@ -28,8 +28,8 @@ if (missing.length > 0) {
 if (!process.env.ADMIN_PHONE) {
   console.warn('[startup] ADMIN_PHONE not set: admin alerts, reschedule and hand-off forwarding disabled');
 }
-if (!process.env.OPENAI_API_KEY) {
-  console.warn('[startup] OPENAI_API_KEY not set: keyword intent detection and fallback replies only');
+if (!process.env.OPENAI_API_KEY && !process.env.GROQ_API_KEY) {
+  console.warn('[startup] OPENAI_API_KEY / GROQ_API_KEY not set: keyword intent detection and fallback replies only');
 }
 
 // Load app modules after env validation. db.js throws on load if DATABASE_URL is missing.

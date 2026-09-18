@@ -21,6 +21,7 @@ const TEST_ENV = {
   TEMPLATE_BOOKING_CANCELLED: 'booking_cancelled',
   TIMEZONE: 'Asia/Kolkata',
   OPENAI_API_KEY: '', // never call OpenAI from tests
+  GROQ_API_KEY: '', // …or Groq
   // Geofencing off unless a test enables it (never inherit the developer's .env values)
   BUSINESS_LAT: '',
   BUSINESS_LNG: '',

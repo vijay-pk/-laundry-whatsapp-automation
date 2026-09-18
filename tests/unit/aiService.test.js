@@ -7,8 +7,9 @@ const assert = require('node:assert/strict');
 
 // Force the no-API-key path before the module reads it.
 process.env.OPENAI_API_KEY = '';
+process.env.GROQ_API_KEY = '';
 
-const { keywordIntent, detectIntent, generateReply } = require('../../src/services/aiService');
+const { aiConfig, keywordIntent, detectIntent, generateReply } = require('../../src/services/aiService');
 
 describe('keywordIntent', () => {
   const cases = [
@@ -66,5 +67,29 @@ describe('without OPENAI_API_KEY', () => {
     const result = await generateReply('what are your prices?', '919999999999');
     assert.equal(result.needsHuman, true);
     assert.match(result.reply, /team will get back/i);
+  });
+});
+
+describe('aiConfig (provider from env)', () => {
+  it('uses OpenAI for an sk- key', () => {
+    assert.deepEqual(aiConfig({ OPENAI_API_KEY: 'sk-abc', OPENAI_MODEL: 'gpt-4o' }), { provider: 'openai', apiKey: 'sk-abc', model: 'gpt-4o' });
+  });
+
+  it('uses Groq for GROQ_API_KEY, with its own model default', () => {
+    assert.deepEqual(aiConfig({ GROQ_API_KEY: 'gsk_abc', OPENAI_MODEL: 'gpt-4o-mini' }), {
+      provider: 'groq', apiKey: 'gsk_abc', baseURL: 'https://api.groq.com/openai/v1', model: 'openai/gpt-oss-20b',
+    });
+    assert.equal(aiConfig({ GROQ_API_KEY: 'gsk_abc', GROQ_MODEL: 'llama-3.3-70b-versatile' }).model, 'llama-3.3-70b-versatile');
+  });
+
+  it('sends a Groq key pasted into OPENAI_API_KEY to Groq, not OpenAI', () => {
+    const config = aiConfig({ OPENAI_API_KEY: 'gsk_pasted' });
+    assert.equal(config.provider, 'groq');
+    assert.equal(config.baseURL, 'https://api.groq.com/openai/v1');
+  });
+
+  it('is null without a usable key', () => {
+    assert.equal(aiConfig({}), null);
+    assert.equal(aiConfig({ OPENAI_API_KEY: 'sk-replace-me' }), null);
   });
 });

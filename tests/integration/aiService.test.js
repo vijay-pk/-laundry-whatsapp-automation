@@ -28,7 +28,8 @@ describe('aiService with OpenAI', () => {
     openai = await startMockOpenAI();
 
     // Must be set before aiService loads (MODEL) and first call (client).
-    for (const key of ['OPENAI_API_KEY', 'OPENAI_BASE_URL', 'OPENAI_MODEL']) env[key] = process.env[key];
+    for (const key of ['OPENAI_API_KEY', 'OPENAI_BASE_URL', 'OPENAI_MODEL', 'GROQ_API_KEY']) env[key] = process.env[key];
+    process.env.GROQ_API_KEY = '';
     process.env.OPENAI_API_KEY = 'sk-test-key';
     process.env.OPENAI_BASE_URL = openai.url;
     process.env.OPENAI_MODEL = TEST_MODEL;

@@ -269,6 +269,7 @@ Validate → 400 · business from body or `DEFAULT_BUSINESS_ID` · idempotent wi
 | `DEFAULT_BUSINESS_ID` | yes for chat booking | Business chat + API bookings belong to (`db:local` / `db:setup` print it) |
 | `ADMIN_PHONE` | no (features disabled) | Admin alerts, reschedules, hand-offs |
 | `OPENAI_API_KEY` / `OPENAI_MODEL` | no / `gpt-4o-mini` | AI intents + replies; without key keyword fallback |
+| `GROQ_API_KEY` / `GROQ_MODEL` | no / `openai/gpt-oss-20b` | Groq instead of OpenAI (OpenAI-compatible API, `aiConfig()`); used when no `sk-` OpenAI key. A `gsk_` key in `OPENAI_API_KEY` also goes to Groq |
 | `TEMPLATE_BOOKING_CANCELLED` | no (`booking_cancelled`) | Cancel confirmation template |
 | `TEMPLATE_ORDER_STATUS` | no (text) | Status update template "Hi {{1}}, {{2}}" |
 | `TIMEZONE` | no (UTC) | Pickup slots + dates in messages |
