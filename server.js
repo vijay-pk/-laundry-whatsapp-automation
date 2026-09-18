@@ -61,8 +61,16 @@ const PORT = Number(process.env.PORT) || 3000;
 // ---------------------------------------------------------------------------
 const app = express();
 
-// Honour X-Forwarded-Proto from a local reverse proxy/tunnel (ngrok) so req.secure is correct.
-app.set('trust proxy', 'loopback');
+// Which proxies to trust for X-Forwarded-For/-Proto (req.ip for login throttling, req.secure for cookies).
+// Default 'loopback' = local tunnel (ngrok). Hosted behind a platform proxy (Render): TRUST_PROXY=<hop count>.
+// A hop count, not 'true': trusting every hop would let clients spoof X-Forwarded-For past the throttle.
+const trustProxySetting = (value) => {
+  const raw = String(value ?? '').trim();
+  if (!raw) return 'loopback';
+  if (/^\d+$/.test(raw)) return Number(raw);
+  return raw; // subnet list / names, e.g. 'loopback, 10.0.0.0/8'
+};
+app.set('trust proxy', trustProxySetting(process.env.TRUST_PROXY));
 
 app.use(cors());
 

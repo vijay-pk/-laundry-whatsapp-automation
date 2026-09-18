@@ -254,6 +254,7 @@ Validate → 400 · business from body or `DEFAULT_BUSINESS_ID` · idempotent wi
 | `AI_LEARNING_REQUIRE_APPROVAL` | no (true) | `false` = reuse AI answers without staff approval |
 | `ADMIN_LOGIN_MAX_IP_FAILURES` | no (20) | Failed admin logins per IP (any email) per 15 min before blocking |
 | `DB_LOCK_POOL_MAX` / `DB_LOCK_TIMEOUT` | no (5 / `60s`) | Connections holding per-customer webhook locks (customers processed in parallel per instance) / max wait for a lock |
+| `TRUST_PROXY` | no (`loopback`) | Proxies trusted for `X-Forwarded-For/-Proto` (`req.ip` throttling, `Secure` cookie). Hosted behind a platform proxy (Render): hop count, e.g. `1`. Never `true` (spoofable IP) |
 | `LOCAL_DB_PORT` | no (5433) | `db:local` port |
 | `WHATSAPP_API_BASE_URL` | no | Graph API host override — tests only |
 | `TEST_DATABASE_URL` | no | `npm test` external DB (name must contain "test") |

@@ -35,6 +35,7 @@ const TEST_ENV = {
   RAZORPAY_API_BASE_URL: 'http://127.0.0.1:9',
   PUBLIC_BASE_URL: '',
   TEMPLATE_ORDER_STATUS: '',
+  TRUST_PROXY: '', // loopback only unless a test sets it
 };
 
 const getFreePort = () =>

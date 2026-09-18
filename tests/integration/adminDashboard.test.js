@@ -109,6 +109,24 @@ describe('Admin dashboard', () => {
       }
     });
 
+    it('behind a hosting proxy (TRUST_PROXY=1) uses the client IP and HTTPS from forwarded headers', async () => {
+      const proxied = await startServer({ graphUrl: graph.url, env: { TRUST_PROXY: '1', ADMIN_LOGIN_MAX_IP_FAILURES: '3' } });
+      try {
+        const attempt = (ip, email, password = 'wrong-password-x') =>
+          proxied.request('POST', '/admin/login', {
+            form: { email, password },
+            headers: { 'X-Forwarded-For': ip, 'X-Forwarded-Proto': 'https' },
+          });
+        for (const n of [1, 2, 3]) assert.equal((await attempt('203.0.113.1', `proxy${n}@laundry.test`)).status, 401);
+        assert.equal((await attempt('203.0.113.1', 'proxy4@laundry.test')).status, 429, 'same client blocked');
+        const other = await attempt('203.0.113.2', 'a@laundry.test', PASSWORD);
+        assert.equal(other.status, 303, 'other clients behind the same proxy are not blocked');
+        assert.match(other.headers.get('set-cookie'), /; Secure/);
+      } finally {
+        await proxied.stop();
+      }
+    });
+
     it('logs out and invalidates the session', async () => {
       const { cookie, csrf } = await session('a@laundry.test');
       const out = await post('/admin/logout', cookie, { _csrf: csrf });
