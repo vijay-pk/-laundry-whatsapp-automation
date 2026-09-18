@@ -10,7 +10,8 @@
     "test:unit": "node --test \"tests/unit/**/*.test.js\"",
     "db:local": "node scripts/localDb.js",
     "db:setup": "node scripts/setupDb.js",
-    "admin:create": "node scripts/createAdmin.js"
+    "admin:create": "node scripts/createAdmin.js",
+    "site:build": "node scripts/buildSite.js"
   },
   "keywords": [],
   "author": "",

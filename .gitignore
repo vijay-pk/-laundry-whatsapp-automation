@@ -19,3 +19,6 @@ Thumbs.db
 
 # Local development database (npm run db:local)
 .localdb/
+
+# Built public website (npm run site:build)
+site/dist/

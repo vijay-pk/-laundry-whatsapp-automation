@@ -19,6 +19,7 @@ npm install
 npm run db:local                              # local Postgres in .localdb/ (port 5433); keep terminal open
 npm run db:setup                              # apply schema + ensure business row on DATABASE_URL (e.g. Supabase)
 npm run admin:create -- --email you@x.com     # dashboard login for DEFAULT_BUSINESS_ID (--business <uuid>, --role super_admin)
+npm run site:build                            # public website -> site/dist (fails on [EDIT] values; SITE_ALLOW_PLACEHOLDERS=true to preview)
 npm run dev                                   # nodemon server.js
 npm start                                     # node server.js
 npm test                                      # all tests (starts throwaway Postgres automatically)
@@ -109,7 +110,15 @@ src/routes/payRoutes.js, adminRoutes.js
 src/views/html.js, payPage.js, adminPages.js   Server-rendered HTML (esc() everything), CSP with nonces
 src/utils/money.js, passwords.js        Paise math + calculatePaymentTerms; scrypt hashing + random tokens
 tests/, .github/workflows/ci.yml       See Tests / CI
+scripts/buildSite.js                   Static public website (home, privacy, 404) from businessKnowledge.js → site/dist
+site/public/                           Site assets copied as-is: styles.css, favicon.svg, _headers (Cloudflare CSP), optional whatsapp-qr.png
 ```
+
+## Public website (`site/`)
+
+- Static, no JavaScript, deployed separately on **Cloudflare Pages** (build `npm run site:build`, output `site/dist`). Backend (admin, `/pay`, webhooks) stays on Render.
+- Content comes from `businessKnowledge.js` (name, description, hours, service area, contact, `whatsappNumber`, `email`, `address`, services, pickup slots, policies) so the site and the bot never disagree. Build refuses `[EDIT]` values.
+- CTA = `wa.me/<whatsappNumber>?text=Hi` (bot answers with the welcome menu). `/privacy` is the Privacy Policy URL for Meta App Live mode.
 
 ## Routes
 
