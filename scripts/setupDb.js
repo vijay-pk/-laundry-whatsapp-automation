@@ -14,6 +14,7 @@ const path = require('path');
 const { Client } = require('pg');
 
 const { businessKnowledge } = require('../src/config/businessKnowledge');
+const { pgConnectionConfig } = require('../src/config/pgConfig');
 
 const SCHEMA_PATH = path.join(__dirname, '..', 'src', 'models', 'schema.sql');
 
@@ -22,7 +23,7 @@ const SCHEMA_PATH = path.join(__dirname, '..', 'src', 'models', 'schema.sql');
  * @returns {Promise<{businessId: string, created: boolean}>}
  */
 const setupDatabase = async (databaseUrl) => {
-  const client = new Client({ connectionString: databaseUrl });
+  const client = new Client(pgConnectionConfig(databaseUrl));
   await client.connect();
 
   try {

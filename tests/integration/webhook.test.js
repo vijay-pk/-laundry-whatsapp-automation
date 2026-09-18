@@ -49,6 +49,7 @@ describe('POST/GET /webhook', () => {
       );
       assert.equal(res.status, 200);
       assert.equal(res.text, '12345');
+      assert.match(res.headers.get('content-type'), /^text\/plain/, 'challenge never served as HTML');
     });
 
     it('returns 403 for a wrong token', async () => {

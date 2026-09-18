@@ -5,6 +5,7 @@
 
 require('dotenv').config({ quiet: true });
 const { Pool } = require('pg');
+const { pgConnectionConfig } = require('./pgConfig');
 
 // ---------------------------------------------------------------------------
 // 1. Validate configuration
@@ -18,7 +19,7 @@ if (!process.env.DATABASE_URL) {
 //    One pool per process. It reuses connections instead of opening one per query.
 // ---------------------------------------------------------------------------
 const pool = new Pool({
-  connectionString: process.env.DATABASE_URL,
+  ...pgConnectionConfig(process.env.DATABASE_URL), // ssl CA from DATABASE_CA_CERT when set
   max: Number(process.env.DB_POOL_MAX) || 10,   // max concurrent connections
   idleTimeoutMillis: 30000,                     // close idle clients after 30s
   connectionTimeoutMillis: 5000,                // fail fast if DB is unreachable
@@ -83,7 +84,7 @@ let lockPool;
 const getLockPool = () => {
   if (!lockPool) {
     lockPool = new Pool({
-      connectionString: process.env.DATABASE_URL,
+      ...pgConnectionConfig(process.env.DATABASE_URL), // ssl CA from DATABASE_CA_CERT when set
       max: Number(process.env.DB_LOCK_POOL_MAX) || 5, // customers processed in parallel per instance
       idleTimeoutMillis: 30000,
       connectionTimeoutMillis: 60000,

@@ -289,7 +289,8 @@ const verifyWebhook = (req, res) => {
 
   if (mode === 'subscribe' && token && token === process.env.WEBHOOK_VERIFY_TOKEN) {
     console.log('[webhook] Verification successful');
-    return res.status(200).send(challenge);
+    // text/plain: the echoed challenge is never rendered as HTML
+    return res.status(200).type('text/plain').send(String(challenge ?? ''));
   }
 
   console.warn('[webhook] Verification failed: invalid mode or token');

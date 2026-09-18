@@ -286,4 +286,20 @@ ALTER TABLE messages ADD COLUMN IF NOT EXISTS approved_at TIMESTAMPTZ;
 ALTER TABLE messages ADD COLUMN IF NOT EXISTS approved_by UUID REFERENCES admin_users(id) ON DELETE SET NULL;
 CREATE INDEX IF NOT EXISTS idx_messages_ai_answers ON messages (intent, direction, created_at DESC);
 
+-- -----------------------------------------------------------------------------
+-- Row Level Security on every table, no policies. Supabase exposes the public schema
+-- through its Data API (anon key is public): without RLS anyone could read bookings,
+-- phones and admin data. The app connects as the table owner, which bypasses RLS.
+-- -----------------------------------------------------------------------------
+ALTER TABLE businesses ENABLE ROW LEVEL SECURITY;
+ALTER TABLE bookings ENABLE ROW LEVEL SECURITY;
+ALTER TABLE messages ENABLE ROW LEVEL SECURITY;
+ALTER TABLE webhook_events ENABLE ROW LEVEL SECURITY;
+ALTER TABLE conversation_sessions ENABLE ROW LEVEL SECURITY;
+ALTER TABLE business_payment_settings ENABLE ROW LEVEL SECURITY;
+ALTER TABLE payments ENABLE ROW LEVEL SECURITY;
+ALTER TABLE razorpay_webhook_events ENABLE ROW LEVEL SECURITY;
+ALTER TABLE admin_users ENABLE ROW LEVEL SECURITY;
+ALTER TABLE admin_sessions ENABLE ROW LEVEL SECURITY;
+
 COMMIT;
