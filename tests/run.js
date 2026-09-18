@@ -91,7 +91,8 @@ const runNodeTest = (databaseUrl, extraArgs) =>
       {
         cwd: ROOT,
         stdio: 'inherit',
-        env: { ...process.env, DATABASE_URL: databaseUrl, NODE_ENV: 'test' },
+        // DATABASE_CA_CERT empty: never apply a production CA from .env to the test database
+        env: { ...process.env, DATABASE_URL: databaseUrl, DATABASE_CA_CERT: '', NODE_ENV: 'test' },
       }
     );
     child.on('exit', (code) => resolve(code ?? 1));
