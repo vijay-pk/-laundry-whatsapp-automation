@@ -14,14 +14,11 @@ const bodyParser = require('body-parser');
 const cors = require('cors');
 
 // Fail fast with a clear message before any module tries to use these.
-const REQUIRED_ENV = [
-  'WEBHOOK_VERIFY_TOKEN',
-  'GRAPH_API_TOKEN',
-  'PHONE_NUMBER_ID',
-  'META_APP_SECRET',
-  'DATABASE_URL',
-  'BOOKING_API_KEY',
-];
+const { isQrChannel } = require('./src/config/channel');
+
+// QR login (WHATSAPP_CHANNEL=baileys) needs no Meta app, so no Meta credentials.
+const META_ENV = ['WEBHOOK_VERIFY_TOKEN', 'GRAPH_API_TOKEN', 'PHONE_NUMBER_ID', 'META_APP_SECRET'];
+const REQUIRED_ENV = [...(isQrChannel() ? [] : META_ENV), 'DATABASE_URL', 'BOOKING_API_KEY'];
 const missing = REQUIRED_ENV.filter((key) => !process.env[key]);
 if (missing.length > 0) {
   console.error(`[startup] Missing required environment variables: ${missing.join(', ')}`);
@@ -36,7 +33,8 @@ if (!process.env.OPENAI_API_KEY) {
 }
 
 // Load app modules after env validation. db.js throws on load if DATABASE_URL is missing.
-const { verifyWebhook, handleIncomingMessage } = require('./src/controllers/webhookController');
+const { verifyWebhook, handleIncomingMessage, processIncoming } = require('./src/controllers/webhookController');
+const baileysChannel = require('./src/channels/baileysChannel');
 const { createNewBooking, updateStatus } = require('./src/controllers/bookingController');
 const { verifyMetaSignature } = require('./src/utils/verifyMetaSignature');
 const { purgeOldEvents } = require('./src/models/webhookEventModel');
@@ -162,6 +160,12 @@ const server = app.listen(PORT, () => {
   console.log(`[startup] Server listening on port ${PORT}`);
 });
 
+// WhatsApp over QR login: connect as a linked device (scan the QR at /admin/whatsapp).
+if (isQrChannel()) {
+  console.warn('[startup] WHATSAPP_CHANNEL=baileys: WhatsApp via QR login (unofficial; the number can be banned)');
+  baileysChannel.start(processIncoming);
+}
+
 // ---------------------------------------------------------------------------
 // 8. Background jobs
 //    Purge old webhook idempotency ids and abandoned chat sessions at startup, then daily.
@@ -186,13 +190,15 @@ setInterval(runPurge, PURGE_INTERVAL_MS).unref(); // unref: never keeps the proc
 
 // WhatsApp Pay: reconcile unpaid payment requests with Meta's lookup API (recovers missed webhooks).
 const WHATSAPP_PAY_SYNC_MS = Number(process.env.WHATSAPP_PAY_SYNC_MINUTES || 5) * 60 * 1000;
-setInterval(async () => {
-  try {
-    await syncPendingWhatsAppPayments();
-  } catch (err) {
-    console.error(`[jobs] WhatsApp Pay sync failed: ${err.message}`);
-  }
-}, WHATSAPP_PAY_SYNC_MS).unref();
+if (!isQrChannel()) {
+  setInterval(async () => {
+    try {
+      await syncPendingWhatsAppPayments();
+    } catch (err) {
+      console.error(`[jobs] WhatsApp Pay sync failed: ${err.message}`);
+    }
+  }, WHATSAPP_PAY_SYNC_MS).unref();
+}
 
 // ---------------------------------------------------------------------------
 // 9. Process-level safety nets & graceful shutdown
@@ -208,7 +214,10 @@ process.on('uncaughtException', (err) => {
 
 const shutdown = (signal) => {
   console.log(`[shutdown] ${signal} received, closing server...`);
+  // Close the QR-login socket first: frees its instance lock for the next deploy right away.
+  const channelStopped = baileysChannel.stop().catch(() => {});
   server.close(async () => {
+    await channelStopped;
     await closePools().catch(() => {}); // release DB connections (queries + locks)
     console.log('[shutdown] Server and DB pool closed');
     process.exit(0);

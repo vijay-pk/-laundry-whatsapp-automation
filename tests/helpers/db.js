@@ -22,7 +22,7 @@ const { pool, query, closePools } = require('../../src/config/db');
 
 // Empty all tables so each test file starts clean.
 const resetDb = async () => {
-  await query('TRUNCATE razorpay_webhook_events, admin_sessions, admin_users, payments, business_payment_settings, conversation_sessions, webhook_events, messages, bookings, businesses CASCADE');
+  await query('TRUNCATE whatsapp_auth, razorpay_webhook_events, admin_sessions, admin_users, payments, business_payment_settings, conversation_sessions, webhook_events, messages, bookings, businesses CASCADE');
 };
 
 let businessCounter = 0;

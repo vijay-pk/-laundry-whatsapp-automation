@@ -318,7 +318,19 @@ const handleIncomingMessage = async (req, res) => {
   await handlePaymentStatuses(req.body);
 };
 
+/**
+ * Messages from the QR-login channel (already in webhook message shape).
+ * Same pipeline as POST /webhook: idempotency, per-customer lock, flows. Never throws.
+ * @param {Array<{message: object, profileName: string|null}>} items
+ */
+const processIncoming = async (items) => {
+  for (const item of items) {
+    await processOnce(item);
+  }
+};
+
 module.exports = {
   verifyWebhook,
   handleIncomingMessage,
+  processIncoming,
 };

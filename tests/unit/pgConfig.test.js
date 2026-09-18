@@ -31,6 +31,11 @@ describe('pgConnectionConfig', () => {
     assert.equal(config.ssl.ca, PEM);
   });
 
+  it('ignores the CA for a local database (no TLS there)', () => {
+    const local = 'postgresql://postgres:pw@localhost:5433/laundry';
+    assert.deepEqual(pgConnectionConfig(local, PEM), { connectionString: local });
+  });
+
   it('rejects a value that is not a PEM certificate', () => {
     assert.throws(() => pgConnectionConfig(URL_WITH_SSL, 'not-a-cert'), /PEM certificate/);
   });

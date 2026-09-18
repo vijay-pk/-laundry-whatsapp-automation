@@ -7,6 +7,7 @@ const { esc, page } = require('./html');
 const { formatINR, calculatePaymentTerms } = require('../utils/money');
 const { formatDateTime } = require('../utils/formatDate');
 const { PAYMENT_STATUS_LABELS } = require('../services/paymentService');
+const { isQrChannel } = require('../config/channel');
 
 const PAYMENT_BADGE = { paid: 'ok', partially_paid: 'info', pending: 'warn', failed: 'bad', refunded: 'info', not_required: '' };
 const BOOKING_BADGE = { Confirmed: 'info', Delivered: 'ok', Cancelled: 'bad', Pending: 'warn' };
@@ -20,6 +21,7 @@ const nav = (admin, csrf) => `
   <a href="/admin/bookings">Bookings</a>
   <a href="/admin/payment-settings">Payment Settings</a>
   <a href="/admin/ai-answers">AI Answers</a>
+  ${isQrChannel() && admin.role === 'admin' ? '<a href="/admin/whatsapp">WhatsApp</a>' : ''}
   <span class="spacer"></span>
   <span class="small">${esc(admin.email)}${admin.role === 'super_admin' ? ' (super admin)' : ` · ${esc(admin.business_name || '')}`}</span>
   <form method="post" action="/admin/logout"><input type="hidden" name="_csrf" value="${esc(csrf)}">
@@ -297,4 +299,4 @@ const renderAiAnswers = ({ nonce, admin, csrf, answers, flash = '' }) => {
   });
 };
 
-module.exports = { renderLogin, renderBookings, renderSettings, renderSettingsOverview, renderAiAnswers, previewText };
+module.exports = { nav, renderLogin, renderBookings, renderSettings, renderSettingsOverview, renderAiAnswers, previewText };

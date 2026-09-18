@@ -68,6 +68,17 @@ describe('validateSettings', () => {
     assert.deepEqual([ok.onlineProvider, ok.whatsappPayConfiguration, ok.whatsappPayGateway], ['whatsapp_pay', 'laundry-upi', 'razorpay']);
     assert.throws(() => validateSettings({ onlineProvider: 'whatsapp_pay', whatsappPayGateway: 'payu' }), { status: 400 });
     assert.throws(() => validateSettings({ onlineProvider: 'whatsapp_pay', whatsappPayConfiguration: 'x'.repeat(61), whatsappPayGateway: 'payu' }), { status: 400 });
+
+    // QR login (WHATSAPP_CHANNEL=baileys) can't send WhatsApp Pay requests
+    process.env.WHATSAPP_CHANNEL = 'baileys';
+    try {
+      assert.throws(
+        () => validateSettings({ onlineProvider: 'whatsapp_pay', whatsappPayConfiguration: 'laundry-upi', whatsappPayGateway: 'razorpay' }),
+        { status: 400, message: /Cloud API/ }
+      );
+    } finally {
+      delete process.env.WHATSAPP_CHANNEL;
+    }
     assert.throws(() => validateSettings({ onlineProvider: 'whatsapp_pay', whatsappPayConfiguration: 'cfg', whatsappPayGateway: 'paypal' }), { status: 400 });
     assert.equal(validateSettings({ onlineProvider: 'bitcoin' }).onlineProvider, 'razorpay_link');
   });

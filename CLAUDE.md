@@ -109,6 +109,12 @@ src/controllers/adminController.js     /admin login/logout, bookings, payment se
 src/routes/payRoutes.js, adminRoutes.js
 src/views/html.js, payPage.js, adminPages.js   Server-rendered HTML (esc() everything), CSP with nonces
 src/utils/money.js, passwords.js        Paise math + calculatePaymentTerms; scrypt hashing + random tokens
+src/config/channel.js                  isQrChannel() (WHATSAPP_CHANNEL=baileys)
+src/config/messageTemplates.js         Text versions of Meta templates (QR login)
+src/channels/baileysChannel.js         QR-login socket: instance lock, reconnect, send, pairing code, logout, status
+src/channels/baileysFormat.js          Cloud payload ⇄ Baileys message, menu memory (pure)
+src/channels/baileysAuthState.js       Baileys auth state in Postgres (whatsapp_auth) via whatsappAuthModel.js
+src/controllers/whatsappAdminController.js, src/views/whatsappPage.js   /admin/whatsapp
 tests/, .github/workflows/ci.yml       See Tests / CI
 scripts/buildSite.js                   Static public website (home, privacy, 404) from businessKnowledge.js → site/dist
 site/public/                           Site assets copied as-is: styles.css, favicon.svg, _headers (Cloudflare CSP), optional whatsapp-qr.png
@@ -119,6 +125,16 @@ site/public/                           Site assets copied as-is: styles.css, fav
 - Static, no JavaScript, deployed separately on **Cloudflare Pages** (build `npm run site:build`, output `site/dist`). Backend (admin, `/pay`, webhooks) stays on Render.
 - Content comes from `businessKnowledge.js` (name, description, hours, service area, contact, `whatsappNumber`, `email`, `address`, services, pickup slots, policies) so the site and the bot never disagree. Build refuses `[EDIT]` values.
 - CTA = `wa.me/<whatsappNumber>?text=Hi` (bot answers with the welcome menu). `/privacy` is the Privacy Policy URL for Meta App Live mode.
+
+## WhatsApp QR login (`WHATSAPP_CHANNEL=baileys`, `src/channels/`)
+
+- Alternative to the Meta Cloud API: the server is a **linked device** of a normal WhatsApp account (Baileys `7.0.0-rc14`, ESM, loaded with `import()`). No Meta app/credentials (server doesn't require `WEBHOOK_VERIFY_TOKEN`/`GRAPH_API_TOKEN`/`PHONE_NUMBER_ID`/`META_APP_SECRET`). **Unofficial: WhatsApp can ban the number.**
+- Link at `/admin/whatsapp` (business admin): QR (refreshes every 15s) or pairing code; unlink / reconnect. Nav link only in QR mode.
+- Session in Postgres `whatsapp_auth` (`baileysAuthState.js`, BufferJSON), so Render deploys keep the login. `loggedOut` (401) ⇒ session cleared + new QR; `connectionReplaced` (440) ⇒ stop, admin reconnects.
+- **One socket per account**: `pg_try_advisory_lock('whatsapp:baileys')` on a dedicated connection; a second instance waits (`waiting_for_other_instance`) and takes over when the first stops/dies. Shutdown stops the socket first.
+- Outbound: `whatsappService.sendMessage` hands the same Cloud payload to `baileysChannel.sendPayload` → `baileysFormat.toOutbound`: text as is; buttons/lists → numbered options ("Reply with a number"); templates → text from `config/messageTemplates.js`; `order_details` ⇒ 501 (WhatsApp Pay disabled: settings reject it, `getPaymentOptions` treats it as offline, sync job off). "typing…" presence + short delay before each send.
+- Inbound: `messages.upsert` (`notify` only, ≤ 24h old) → `toCloudMessage` (text, location, media kinds; ignores own/group/status/reaction/protocol; LID chats use `remoteJidAlt`) → **menu memory** (last numbered menu per phone, 24h, in memory; any plain message clears it) turns "2"/exact title into a `list_reply` tap → `webhookController.processIncoming` (same idempotency `bl_<id>`, per-customer lock, flows). Batches processed in order.
+- No 24h window / templates needed; admin alerts are plain text.
 
 ## Routes
 
@@ -265,6 +281,8 @@ Validate → 400 · business from body or `DEFAULT_BUSINESS_ID` · idempotent wi
 | `DB_LOCK_POOL_MAX` / `DB_LOCK_TIMEOUT` | no (5 / `60s`) | Connections holding per-customer webhook locks (customers processed in parallel per instance) / max wait for a lock |
 | `TRUST_PROXY` | no (`loopback`) | Proxies trusted for `X-Forwarded-For/-Proto` (`req.ip` throttling, `Secure` cookie). Hosted behind a platform proxy (Render): hop count, e.g. `1`. Never `true` (spoofable IP) |
 | `LOCAL_DB_PORT` | no (5433) | `db:local` port |
+| `WHATSAPP_CHANNEL` | no (`cloud`) | `baileys` = WhatsApp via QR login at `/admin/whatsapp` (no Meta vars needed; unofficial, ban risk) |
+| `BAILEYS_LOG_LEVEL` | no (`error`) | pino level for Baileys internals |
 | `WHATSAPP_API_BASE_URL` | no | Graph API host override — tests only |
 | `TEST_DATABASE_URL` | no | `npm test` external DB (name must contain "test") |
 | `RAZORPAY_KEY_ID` / `RAZORPAY_KEY_SECRET` | no (online payment off) | Razorpay API keys (secret server-only) |

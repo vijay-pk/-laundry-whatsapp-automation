@@ -5,6 +5,7 @@
 
 const express = require('express');
 const admin = require('../controllers/adminController');
+const whatsapp = require('../controllers/whatsappAdminController');
 const { loadAdmin, requireAdmin, requireBusinessAdmin, verifyCsrf } = require('../middleware/adminAuth');
 
 const router = express.Router();
@@ -25,5 +26,11 @@ router.post('/payment-settings', requireAdmin, requireBusinessAdmin, verifyCsrf,
 router.get('/ai-answers', requireAdmin, (req, res, next) => admin.showAiAnswers(req, res, next));
 router.post('/ai-answers/:id/approve', requireAdmin, requireBusinessAdmin, verifyCsrf, admin.approveAiAnswer);
 router.post('/ai-answers/:id/unapprove', requireAdmin, requireBusinessAdmin, verifyCsrf, admin.unapproveAiAnswer);
+
+// QR-login WhatsApp connection (WHATSAPP_CHANNEL=baileys)
+router.get('/whatsapp', requireAdmin, requireBusinessAdmin, whatsapp.showWhatsApp);
+router.post('/whatsapp/pair', requireAdmin, requireBusinessAdmin, verifyCsrf, whatsapp.pair);
+router.post('/whatsapp/logout', requireAdmin, requireBusinessAdmin, verifyCsrf, whatsapp.logout);
+router.post('/whatsapp/reconnect', requireAdmin, requireBusinessAdmin, verifyCsrf, whatsapp.reconnect);
 
 module.exports = router;

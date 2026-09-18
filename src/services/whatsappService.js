@@ -6,6 +6,8 @@
 require('dotenv').config({ quiet: true });
 const axios = require('axios');
 
+const baileysChannel = require('../channels/baileysChannel');
+
 // ---------------------------------------------------------------------------
 // 1. Constants
 // ---------------------------------------------------------------------------
@@ -78,6 +80,18 @@ const maskPhone = (phone) => `***${phone.slice(-4)}`;
 // 4. Core sender: every outbound message goes through here
 // ---------------------------------------------------------------------------
 const sendMessage = async (payload, context) => {
+  // QR login (WHATSAPP_CHANNEL=baileys): same payloads, sent as text over the linked device.
+  if (baileysChannel.isEnabled()) {
+    try {
+      const result = await baileysChannel.sendPayload(payload);
+      console.log(`[whatsapp] Sent ${context} to ${maskPhone(payload.to)} via QR login | messageId=${result.messageId}`);
+      return result;
+    } catch (err) {
+      console.error(`[whatsapp] ${context} to ${maskPhone(payload.to)} failed via QR login: ${err.message}`);
+      throw err.status ? err : createError(`WhatsApp send failed: ${err.message}`, 502);
+    }
+  }
+
   const body = {
     messaging_product: 'whatsapp',
     recipient_type: 'individual',

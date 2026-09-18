@@ -11,6 +11,7 @@
  *     webhooks and retries are processed once.
  */
 
+const { isQrChannel } = require('../config/channel');
 const { withTransaction } = require('../config/db');
 const razorpay = require('./razorpayService');
 const { replyText, notifyAdmin, maskPhone } = require('./replyService');
@@ -56,7 +57,7 @@ const getPaymentOptions = async (businessId) => {
   // Online provider chosen by the admin: Razorpay web link or in-chat WhatsApp Pay.
   const provider = settings.onlineProvider === 'whatsapp_pay' ? 'whatsapp_pay' : 'razorpay';
   const online = provider === 'whatsapp_pay'
-    ? Boolean(settings.whatsappPayConfiguration && settings.whatsappPayGateway)
+    ? Boolean(settings.whatsappPayConfiguration && settings.whatsappPayGateway) && !isQrChannel() // no order_details over QR login
     : razorpay.isConfigured() && Boolean(publicBaseUrl());
   const cod = settings.allowCashOnDelivery;
   if (!online && !cod) {

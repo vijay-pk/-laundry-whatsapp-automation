@@ -22,3 +22,7 @@ Thumbs.db
 
 # Built public website (npm run site:build)
 site/dist/
+
+# Database CA certificates downloaded for local setup (belong in hosting env vars)
+*.crt
+*.pem

@@ -3,6 +3,7 @@
  * Per-business payment settings. No row means payment is disabled (the default).
  */
 
+const { isQrChannel } = require('../config/channel');
 const { query } = require('../config/db');
 
 // How customers pay online:
@@ -78,6 +79,9 @@ const validateSettings = (input) => {
   let whatsappPayConfiguration = typeof input.whatsappPayConfiguration === 'string' ? input.whatsappPayConfiguration.trim() : '';
   let whatsappPayGateway = WHATSAPP_PAY_GATEWAYS.includes(input.whatsappPayGateway) ? input.whatsappPayGateway : null;
 
+  if (onlineProvider === 'whatsapp_pay' && isQrChannel()) {
+    throw createError('WhatsApp Pay needs the official WhatsApp Cloud API. With QR login, use the Razorpay payment link.', 400);
+  }
   if (onlineProvider === 'whatsapp_pay') {
     // Name exactly as created in WhatsApp Manager > Payment configurations (Meta limit 60 chars).
     if (!/^[A-Za-z0-9 _.\-]{1,60}$/.test(whatsappPayConfiguration)) {

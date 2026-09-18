@@ -287,6 +287,17 @@ ALTER TABLE messages ADD COLUMN IF NOT EXISTS approved_by UUID REFERENCES admin_
 CREATE INDEX IF NOT EXISTS idx_messages_ai_answers ON messages (intent, direction, created_at DESC);
 
 -- -----------------------------------------------------------------------------
+-- WhatsApp QR login (WHATSAPP_CHANNEL=baileys): linked-device credentials and Signal keys.
+-- Kept in the database because hosted disks (Render) are wiped on every deploy/restart.
+-- Anyone with these rows can act as the business WhatsApp account: treat like a password.
+-- -----------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS whatsapp_auth (
+  id          TEXT         PRIMARY KEY,   -- 'creds' or '<type>-<key id>'
+  data        TEXT         NOT NULL,      -- JSON (Baileys BufferJSON encoding)
+  updated_at  TIMESTAMPTZ  NOT NULL DEFAULT NOW()
+);
+
+-- -----------------------------------------------------------------------------
 -- Row Level Security on every table, no policies. Supabase exposes the public schema
 -- through its Data API (anon key is public): without RLS anyone could read bookings,
 -- phones and admin data. The app connects as the table owner, which bypasses RLS.
@@ -301,5 +312,6 @@ ALTER TABLE payments ENABLE ROW LEVEL SECURITY;
 ALTER TABLE razorpay_webhook_events ENABLE ROW LEVEL SECURITY;
 ALTER TABLE admin_users ENABLE ROW LEVEL SECURITY;
 ALTER TABLE admin_sessions ENABLE ROW LEVEL SECURITY;
+ALTER TABLE whatsapp_auth ENABLE ROW LEVEL SECURITY;
 
 COMMIT;
