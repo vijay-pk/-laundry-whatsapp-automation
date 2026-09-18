@@ -37,7 +37,9 @@ const replyList = async (to, booking, body, buttonText, rows, intent) => {
   await safeLog(booking, 'outbound', `${body}\n[list: ${rows.map((r) => r.title).join(' | ')}]`, intent, to);
 };
 
-// Plain-text note to the admin. Returns false if ADMIN_PHONE is missing.
+// Plain-text note to the admin. Returns false if ADMIN_PHONE is missing or sending failed.
+// Never throws: the customer has usually been answered already, and a failed admin note must not
+// turn the message into an error (which would also send the customer an apology).
 // Text only arrives if the admin messaged the business number in the last 24 hours.
 const notifyAdmin = async (lines) => {
   const adminPhone = process.env.ADMIN_PHONE;
@@ -45,8 +47,13 @@ const notifyAdmin = async (lines) => {
     console.warn('[reply] ADMIN_PHONE not set; admin notification skipped');
     return false;
   }
-  await sendTextMessage(adminPhone, lines.join('\n'));
-  return true;
+  try {
+    await sendTextMessage(adminPhone, lines.join('\n'));
+    return true;
+  } catch (err) {
+    console.error(`[reply] Admin notification failed: ${err.message}${err.hint ? ` | hint: ${err.hint}` : ''}`);
+    return false;
+  }
 };
 
 module.exports = { maskPhone, safeLog, replyText, replyButtons, replyList, notifyAdmin };

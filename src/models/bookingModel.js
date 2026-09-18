@@ -4,6 +4,7 @@
  */
 
 const { query } = require('../config/db');
+const { CLOSED_STATUSES } = require('../config/orderStatuses');
 
 const VALID_DIRECTIONS = ['inbound', 'outbound'];
 
@@ -45,7 +46,10 @@ const requireString = (value, field) => {
 // createBooking
 // clientData: { clientPhone, clientName, serviceType, pickupAddress, scheduledTime,
 //              externalId?, notes?, source? ("api" | "whatsapp"), status? (default Pending),
-//              latitude?, longitude?, distanceKm?, bookingState? (default 'pending') }
+//              latitude?, longitude?, distanceKm?, bookingState? (default 'pending'),
+//              quantity?, unit?, unitPrice?, totalAmount?, paymentStatus? (default 'not_required'),
+//              paymentMethod?, paymentMode?, paymentTerms?, amountDueNow?, amountRemaining?, paymentToken?,
+//              locationPrecision? ('exact' | 'approximate'), locationLink? }
 // Returns the created booking row.
 // With externalId: returns null if this business already has a booking with that
 // externalId (duplicate request). The unique index makes this safe under concurrency.
@@ -76,9 +80,13 @@ const createBooking = async (businessId, clientData = {}) => {
   const sql = `
     INSERT INTO bookings
       (business_id, client_phone, client_name, service_type, pickup_address, scheduled_time,
-       external_id, notes, source, status, latitude, longitude, distance_km, booking_state)
+       external_id, notes, source, status, latitude, longitude, distance_km, booking_state,
+       quantity, unit, unit_price, total_amount, payment_status, payment_method, payment_mode,
+       payment_terms, amount_due_now, amount_remaining, payment_token, location_precision, location_link)
     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, COALESCE($9, 'api'), COALESCE($10, 'Pending'),
-            $11, $12, $13, COALESCE($14, 'pending'))
+            $11, $12, $13, COALESCE($14, 'pending'),
+            $15, $16, $17, $18, COALESCE($19, 'not_required'), $20, $21,
+            $22, $23, $24, $25, $26, $27)
     ON CONFLICT (business_id, external_id) DO NOTHING
     RETURNING *
   `;
@@ -97,6 +105,20 @@ const createBooking = async (businessId, clientData = {}) => {
     clientData.longitude ?? null,
     clientData.distanceKm ?? null,
     clientData.bookingState ?? null,
+    // Pricing + payment snapshot (see schema.sql "Payments"); all optional
+    clientData.quantity ?? null,
+    clientData.unit ?? null,
+    clientData.unitPrice ?? null,
+    clientData.totalAmount ?? null,
+    clientData.paymentStatus ?? null,
+    clientData.paymentMethod ?? null,
+    clientData.paymentMode ?? null,
+    clientData.paymentTerms ? JSON.stringify(clientData.paymentTerms) : null,
+    clientData.amountDueNow ?? null,
+    clientData.amountRemaining ?? null,
+    clientData.paymentToken ?? null,
+    clientData.locationPrecision ?? null,
+    clientData.locationLink ? String(clientData.locationLink).slice(0, 2000) : null,
   ];
 
   try {
@@ -143,6 +165,8 @@ const getBookingById = async (bookingId) => {
 
 // ---------------------------------------------------------------------------
 // getLatestBookingForClient
+// Customer lookups below skip geofence-rejected requests (booking_state 'rejected'):
+// they are kept for reporting but were never orders.
 // Pass businessId in multi-tenant use: the same phone number can be a customer
 // of several businesses. Leaving it out searches every tenant.
 // Returns the booking row, or null if none exists.
@@ -152,11 +176,11 @@ const getLatestBookingForClient = async (clientPhone, businessId = null) => {
 
   const sql = businessId
     ? `SELECT * FROM bookings
-       WHERE client_phone = $1 AND business_id = $2
+       WHERE client_phone = $1 AND business_id = $2 AND booking_state <> 'rejected'
        ORDER BY created_at DESC
        LIMIT 1`
     : `SELECT * FROM bookings
-       WHERE client_phone = $1
+       WHERE client_phone = $1 AND booking_state <> 'rejected'
        ORDER BY created_at DESC
        LIMIT 1`;
   const params = businessId ? [clientPhone.trim(), businessId] : [clientPhone.trim()];
@@ -170,10 +194,95 @@ const getLatestBookingForClient = async (clientPhone, businessId = null) => {
 };
 
 // ---------------------------------------------------------------------------
+// getActiveBookingsForClient
+// Open orders (not Delivered/Cancelled), newest first, at most `limit`.
+// ---------------------------------------------------------------------------
+const MAX_ACTIVE_BOOKINGS = 10;
+
+const getActiveBookingsForClient = async (clientPhone, businessId = null, limit = MAX_ACTIVE_BOOKINGS) => {
+  requireString(clientPhone, 'clientPhone');
+
+  const params = [clientPhone.trim(), CLOSED_STATUSES, Math.min(Math.max(Number(limit) || 1, 1), MAX_ACTIVE_BOOKINGS)];
+  if (businessId) params.push(businessId);
+  const sql = `
+    SELECT * FROM bookings
+    WHERE client_phone = $1 AND status <> ALL($2::text[]) AND booking_state <> 'rejected'${businessId ? ' AND business_id = $4' : ''}
+    ORDER BY created_at DESC
+    LIMIT $3
+  `;
+
+  try {
+    const { rows } = await query(sql, params);
+    return rows;
+  } catch (err) {
+    throw handleDbError('getActiveBookingsForClient', err);
+  }
+};
+
+// ---------------------------------------------------------------------------
+// findClientBookingByRef
+// Customer's booking by its short ref (first 8 hex characters of the id, any case).
+// Scoped to the phone number, so one customer can never reach another's order.
+// Returns the booking row, or null (also for refs that aren't 8 hex characters).
+// ---------------------------------------------------------------------------
+const BOOKING_REF_PATTERN = /^[0-9a-f]{8}$/i;
+
+const findClientBookingByRef = async (clientPhone, ref, businessId = null) => {
+  requireString(clientPhone, 'clientPhone');
+  if (typeof ref !== 'string' || !BOOKING_REF_PATTERN.test(ref.trim())) return null;
+
+  const params = [clientPhone.trim(), `${ref.trim().toLowerCase()}%`];
+  if (businessId) params.push(businessId);
+  const sql = `
+    SELECT * FROM bookings
+    WHERE client_phone = $1 AND id::text LIKE $2 AND booking_state <> 'rejected'${businessId ? ' AND business_id = $3' : ''}
+    ORDER BY created_at DESC
+    LIMIT 1
+  `;
+
+  try {
+    const { rows } = await query(sql, params);
+    return rows[0] || null;
+  } catch (err) {
+    throw handleDbError('findClientBookingByRef', err);
+  }
+};
+
+// ---------------------------------------------------------------------------
+// findDuplicateBooking
+// Client's open order (not Delivered/Cancelled) for the same service and pickup time,
+// from any source. Returns the newest match, or null.
+// ---------------------------------------------------------------------------
+const findDuplicateBooking = async (clientPhone, serviceType, scheduledTime, businessId = null) => {
+  requireString(clientPhone, 'clientPhone');
+  requireString(serviceType, 'serviceType');
+  requireString(scheduledTime, 'scheduledTime');
+
+  const params = [clientPhone.trim(), serviceType, scheduledTime, CLOSED_STATUSES];
+  if (businessId) params.push(businessId);
+  const sql = `
+    SELECT * FROM bookings
+    WHERE client_phone = $1 AND service_type = $2 AND scheduled_time = $3 AND booking_state <> 'rejected'
+      AND status <> ALL($4::text[])${businessId ? ' AND business_id = $5' : ''}
+    ORDER BY created_at DESC
+    LIMIT 1
+  `;
+
+  try {
+    const { rows } = await query(sql, params);
+    return rows[0] || null;
+  } catch (err) {
+    throw handleDbError('findDuplicateBooking', err);
+  }
+};
+
+// ---------------------------------------------------------------------------
 // updateBookingStatus
-// Optional `extra`: { bookingState?, latitude?, longitude?, distanceKm? }
+// Optional `extra`: { bookingState?, latitude?, longitude?, distanceKm?, onlyFromStatuses? }
+// onlyFromStatuses: update only while the current status is one of these (checked in the same
+// UPDATE, so a concurrent change by staff wins); otherwise returns null.
 // Only fields that are provided are changed; others keep their current value.
-// Returns the updated booking row, or null if the booking doesn't exist.
+// Returns the updated booking row, or null if the booking doesn't exist (or onlyFromStatuses didn't match).
 // ---------------------------------------------------------------------------
 const updateBookingStatus = async (bookingId, status, extra = {}) => {
   requireString(bookingId, 'bookingId');
@@ -186,13 +295,15 @@ const updateBookingStatus = async (bookingId, status, extra = {}) => {
 
   const sql = `
     UPDATE bookings
-    SET status = $1,
+    SET status = $1::text,
         booking_state = COALESCE($3, booking_state),
         latitude = COALESCE($4, latitude),
         longitude = COALESCE($5, longitude),
         distance_km = COALESCE($6, distance_km),
+        -- Cancelling a booking that already has money received means a refund is owed.
+        refund_required = refund_required OR ($1::text = 'Cancelled' AND amount_paid > 0),
         updated_at = NOW()
-    WHERE id = $2
+    WHERE id = $2 AND ($7::text[] IS NULL OR status = ANY($7::text[]))
     RETURNING *
   `;
 
@@ -204,6 +315,7 @@ const updateBookingStatus = async (bookingId, status, extra = {}) => {
       extra.latitude ?? null,
       extra.longitude ?? null,
       extra.distanceKm ?? null,
+      Array.isArray(extra.onlyFromStatuses) ? extra.onlyFromStatuses : null,
     ]);
     return rows[0] || null;
   } catch (err) {
@@ -263,6 +375,9 @@ module.exports = {
   findBookingByExternalId,
   getBookingById,
   getLatestBookingForClient,
+  getActiveBookingsForClient,
+  findClientBookingByRef,
+  findDuplicateBooking,
   updateBookingStatus,
   updateBookingSchedule,
   logMessage,

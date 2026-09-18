@@ -305,9 +305,90 @@ const locationRequestText = (radiusKm = Number(process.env.MAX_DELIVERY_RADIUS_K
  */
 const sendLocationRequest = (toPhone) => sendTextMessage(toPhone, locationRequestText());
 
+// ---------------------------------------------------------------------------
+// WhatsApp Pay (India): order_details message + payment lookup
+// ---------------------------------------------------------------------------
+
+/**
+ * Send an order_details message with a "Review and pay" button (WhatsApp Pay).
+ * Amounts are integer paise (offset 100). Only within the 24-hour window.
+ *
+ * @param {string} toPhone
+ * @param {{ referenceId: string, configuration: string, gateway: string, bodyText: string, footerText?: string,
+ *           totalPaise: number, items: Array<{retailerId: string, name: string, amountPaise: number, quantity: number}>,
+ *           expiresAt?: Date, notes?: object, receipt?: string }} order
+ */
+const sendOrderDetailsMessage = async (toPhone, order) => {
+  const to = normalizePhone(toPhone);
+  const body = requireBody(order.bodyText);
+  const money = (value) => ({ value: Math.round(value), offset: 100 });
+
+  const gatewayDetails = {
+    type: order.gateway,
+    configuration_name: order.configuration,
+    ...(order.gateway === 'razorpay' ? { razorpay: { receipt: String(order.receipt || order.referenceId).slice(0, 40), notes: order.notes || {} } } : {}),
+  };
+
+  const subtotal = order.items.reduce((sum, item) => sum + item.amountPaise * item.quantity, 0);
+
+  return sendMessage(
+    {
+      to,
+      type: 'interactive',
+      interactive: {
+        type: 'order_details',
+        body: { text: body },
+        ...(order.footerText ? { footer: { text: truncate(order.footerText, 60) } } : {}),
+        action: {
+          name: 'review_and_pay',
+          parameters: {
+            reference_id: order.referenceId,
+            type: 'digital-goods',
+            payment_settings: [{ type: 'payment_gateway', payment_gateway: gatewayDetails }],
+            currency: 'INR',
+            total_amount: money(order.totalPaise),
+            order: {
+              status: 'pending',
+              ...(order.expiresAt
+                ? { expiration: { timestamp: String(Math.floor(order.expiresAt.getTime() / 1000)), description: 'This payment request has expired.' } }
+                : {}),
+              items: order.items.map((item) => ({
+                retailer_id: item.retailerId,
+                name: truncate(item.name, 60),
+                amount: money(item.amountPaise),
+                quantity: item.quantity,
+              })),
+              subtotal: money(subtotal),
+            },
+          },
+        },
+      },
+    },
+    'WhatsApp Pay order'
+  );
+};
+
+/**
+ * Look up a WhatsApp Pay payment by reference id (reconcile missed webhooks).
+ * GET /<PHONE_NUMBER_ID>/payments/<configuration>/<reference_id>
+ * @returns {Promise<Array<object>>} payments array (status 'pending' | 'captured', transactions[])
+ */
+const lookupWhatsAppPayment = async (configuration, referenceId) => {
+  try {
+    const { data } = await getClient().get(`/payments/${encodeURIComponent(configuration)}/${encodeURIComponent(referenceId)}`);
+    return data?.payments || [];
+  } catch (err) {
+    const status = err.response?.status;
+    console.error(`[whatsapp] Payment lookup failed for ${referenceId}: http=${status ?? 'none'} ${err.response?.data?.error?.message || err.message}`);
+    throw createError('WhatsApp payment lookup failed', status && status < 500 ? 502 : 503);
+  }
+};
+
 module.exports = {
   sendTemplateMessage,
   sendTextMessage,
+  sendOrderDetailsMessage,
+  lookupWhatsAppPayment,
   sendLocationRequest,
   locationRequestText,
   sendButtonsMessage,

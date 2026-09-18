@@ -35,8 +35,34 @@ describe('conversationModel', () => {
     await logAt(40, 'inbound', 'What are your opening hours?', 'question', '919100000004');
     await logAt(39, 'inbound', 'hello?', 'greeting', '919100000004');
     await logAt(38, 'outbound', 'We are open 8 AM to 8 PM.', 'question', '919100000004');
+
+    // Customer E: answered but never approved by staff -> must not be learned
+    await logAt(20, 'inbound', 'Do you iron silk sarees?', 'question', '919100000005');
+    await logAt(19, 'outbound', 'Silk ironing is free today!', 'question', '919100000005');
+
+    // Staff approved every answer except customer E's
+    await query(`UPDATE messages SET approved_at = NOW() WHERE direction = 'outbound' AND client_phone <> '919100000005'`);
   });
   after(closeDb);
+
+  describe('AI answer review', () => {
+    it('lists answers with their question, unapproved first, and toggles approval', async () => {
+      const answers = await convo.listAiAnswers();
+      assert.equal(answers[0].answer, 'Silk ironing is free today!');
+      assert.equal(answers[0].question, 'Do you iron silk sarees?');
+      assert.equal(answers[0].approved_at, null);
+      assert.ok(answers.every((a) => a.answer !== 'A team member will follow up.'), 'hand-offs are not AI answers');
+
+      const { rows: [admin] } = await query(
+        `INSERT INTO admin_users (email, password_hash, role) VALUES ('review@laundry.test', 'x', 'super_admin') RETURNING id`
+      );
+      assert.ok((await convo.setAnswerApproval(answers[0].id, admin.id, true)).approved_at);
+      assert.equal((await convo.setAnswerApproval(answers[0].id, admin.id, false)).approved_at, null);
+
+      const { rows: [handoff] } = await query(`SELECT id FROM messages WHERE intent = 'handoff' LIMIT 1`);
+      assert.equal(await convo.setAnswerApproval(handoff.id, admin.id, true), null, 'only AI answers can be approved');
+    });
+  });
 
   describe('getRecentConversation', () => {
     it('returns the latest N messages, oldest first', async () => {
@@ -65,6 +91,18 @@ describe('conversationModel', () => {
       const results = await convo.findSimilarPastAnswers('opening hours');
       assert.equal(results.length, 1);
       assert.equal(results[0].answer, 'We are open 8 AM to 8 PM.');
+    });
+
+    it('never reuses answers staff have not approved (unless approval is switched off)', async () => {
+      assert.deepEqual(await convo.findSimilarPastAnswers('iron silk sarees'), []);
+
+      process.env.AI_LEARNING_REQUIRE_APPROVAL = 'false';
+      try {
+        const results = await convo.findSimilarPastAnswers('iron silk sarees');
+        assert.equal(results.length, 1);
+      } finally {
+        delete process.env.AI_LEARNING_REQUIRE_APPROVAL;
+      }
     });
 
     it('returns [] when nothing matches', async () => {

@@ -4,35 +4,29 @@
  */
 
 const { detectIntent, generateReply } = require('../services/aiService');
-const { sendTemplateMessage } = require('../services/whatsappService');
 const { maskPhone, safeLog, replyText, notifyAdmin } = require('../services/replyService');
 const {
   FLOW_INTENT,
-  bookingRef,
   sendWelcomeMenu,
   startBooking,
-  startReschedule,
   handleFlowMessage,
 } = require('../services/bookingFlow');
-const { getLatestBookingForClient, updateBookingStatus } = require('../models/bookingModel');
+const { HANDOFF_INTENT, handleOrderRequest, handleOrderChoice } = require('../services/orderActions');
+const { getLatestBookingForClient, getActiveBookingsForClient } = require('../models/bookingModel');
+const { awaitingOnlinePayment } = require('../config/orderStatuses');
+const { handlePaymentStatuses, paymentInstruction, remindPayment } = require('../services/whatsappPayService');
 const { getActiveSession } = require('../models/sessionModel');
 const { claimEvent, markEventDone, markEventFailed } = require('../models/webhookEventModel');
-const { CHANGEABLE_STATUSES, CLOSED_STATUSES, statusMessage } = require('../config/orderStatuses');
+const { withLock } = require('../config/db');
 const { servicesText } = require('../config/businessKnowledge');
-const { formatDateTime } = require('../utils/formatDate');
+const { extractMapsUrl } = require('../utils/mapsLink');
 
 // ---------------------------------------------------------------------------
 // 1. Configuration
 // ---------------------------------------------------------------------------
-// Approved template, assumed body: "Hi {{1}}, your {{2}} booking has been cancelled."
-const CANCEL_TEMPLATE = process.env.TEMPLATE_BOOKING_CANCELLED || 'booking_cancelled';
-
-// Outbound intent for replies that handed the customer to staff.
-// Excluded from AI learning so "we'll get back to you" isn't reused as an answer.
-const HANDOFF_INTENT = 'handoff';
-
 // Typed words that open the main menu without asking the AI.
 const MENU_WORDS = /^(menu|start|main menu)$/i;
+const PAY_WORDS = /^(pay|pay now|payment|make payment)$/i;
 
 const MAX_PROFILE_NAME_LENGTH = 60;
 
@@ -101,84 +95,10 @@ const resolveIntent = async (text) => {
   }
 };
 
-const isActive = (booking) => booking && !CLOSED_STATUSES.includes(booking.status);
-
 // ---------------------------------------------------------------------------
 // 3. Intent handlers
+//    Track / cancel / reschedule / confirm choose the right order in orderActions.
 // ---------------------------------------------------------------------------
-const handleCancel = async (from, booking) => {
-  if (!booking) {
-    return replyText(from, null, "We couldn't find an active booking to cancel.", 'cancel');
-  }
-  if (CLOSED_STATUSES.includes(booking.status)) {
-    return replyText(from, booking, `Your booking is already ${booking.status.toLowerCase()}.`, 'cancel');
-  }
-  if (!CHANGEABLE_STATUSES.includes(booking.status)) {
-    await replyText(from, booking, 'Your clothes have already been picked up, so we can’t cancel online. Our team will contact you shortly.', HANDOFF_INTENT);
-    return notifyAdmin([
-      'Cancellation requested after pickup - please call the customer.',
-      `Booking: #${bookingRef(booking)} (${booking.client_name || 'Unknown'}, +${from})`,
-      `Status: ${booking.status}`,
-    ]);
-  }
-
-  await updateBookingStatus(booking.id, 'Cancelled');
-
-  await sendTemplateMessage(from, CANCEL_TEMPLATE, [
-    booking.client_name || 'Customer',
-    booking.service_type || 'laundry',
-  ]);
-  await safeLog(booking, 'outbound', `[template:${CANCEL_TEMPLATE}]`, 'cancel', from);
-
-  console.log(`[webhook] Booking ${booking.id} cancelled by ${maskPhone(from)}`);
-};
-
-const handleReschedule = async (from, booking, text) => {
-  if (!isActive(booking)) {
-    return replyText(from, booking, "You don't have an active booking to reschedule. Reply *book* to schedule a pickup.", 'reschedule');
-  }
-  if (!CHANGEABLE_STATUSES.includes(booking.status)) {
-    await replyText(from, booking, 'Your clothes have already been picked up. Our team will contact you to arrange the delivery time.', HANDOFF_INTENT);
-    return notifyAdmin([
-      'Reschedule requested after pickup - please follow up.',
-      `Booking: #${bookingRef(booking)} (${booking.client_name || 'Unknown'}, +${from})`,
-      `Status: ${booking.status}`,
-      `Message: "${text}"`,
-    ]);
-  }
-  return startReschedule({ from, booking });
-};
-
-const handleConfirm = async (from, booking) => {
-  if (!booking) {
-    console.warn(`[webhook] Confirm intent from ${maskPhone(from)} but no booking found`);
-    return;
-  }
-  if (CLOSED_STATUSES.includes(booking.status)) {
-    console.warn(`[webhook] Confirm ignored: booking ${booking.id} is ${booking.status}`);
-    return;
-  }
-
-  await updateBookingStatus(booking.id, 'Confirmed');
-  console.log(`[webhook] Booking ${booking.id} confirmed by ${maskPhone(from)}`);
-};
-
-const handleTrack = async (from, booking) => {
-  if (!booking) {
-    return replyText(from, null, "You don't have any orders yet. Reply *book* to schedule a pickup.", 'status');
-  }
-  return replyText(
-    from,
-    booking,
-    [
-      `Order #${bookingRef(booking)}${booking.service_type ? ` - ${booking.service_type}` : ''}`,
-      `Status: *${booking.status}*`,
-      statusMessage(booking, formatDateTime),
-    ].join('\n'),
-    'status'
-  );
-};
-
 const handlePrices = (from) =>
   replyText(from, null, `${servicesText()}\n\nReply *book* to schedule a pickup.`, 'menu');
 
@@ -210,10 +130,12 @@ const handleMenuChoice = async (from, input, booking, profileName) => {
     case 'menu_book':
       return handleBook(from, booking, profileName);
     case 'menu_track':
-      return handleTrack(from, booking);
+      return handleOrderRequest({ from, action: 'track' });
     case 'menu_prices':
       return handlePrices(from);
     default:
+      // Order list rows and cancel buttons keep working after their session expired
+      if (await handleOrderChoice(from, input.id)) return;
       // A button from a flow that has expired or finished
       await replyText(from, null, 'That menu has expired.', 'menu');
       return sendWelcomeMenu(from, profileName || booking?.client_name);
@@ -246,9 +168,9 @@ const processMessage = async ({ message, profileName }) => {
     return handleMenuChoice(from, input, booking, profileName);
   }
 
-  // A location outside any flow can't be checked against a booking: guide the customer to book.
-  // (Inside the booking flow, locations are handled by the geofencing step in bookingFlow.)
-  if (input.type === 'location') {
+  // A location (attachment or Google Maps link) outside any flow can't be checked against a
+  // booking: guide the customer to book. Inside the booking flow, bookingFlow's geofencing step handles it.
+  if (input.type === 'location' || (input.type === 'text' && extractMapsUrl(input.text))) {
     if (!logged) await safeLog(null, 'inbound', describeInput(input), 'location', from);
     return replyText(from, null, 'Thanks for sharing your location! To book a pickup, send *book* and choose a service first.', 'menu');
   }
@@ -260,6 +182,16 @@ const processMessage = async ({ message, profileName }) => {
   }
 
   const text = input.text;
+
+  // "pay": send the payment instructions (WhatsApp Pay message or Razorpay link) again.
+  if (PAY_WORDS.test(text)) {
+    const unpaid = (await getActiveBookingsForClient(from)).find(awaitingOnlinePayment);
+    if (unpaid) {
+      if (!logged) await safeLog(unpaid, 'inbound', text, 'payment', from);
+      await replyText(from, unpaid, `Order #${unpaid.id.slice(0, 8).toUpperCase()} is waiting for payment.\n${paymentInstruction(unpaid)}`, 'payment');
+      return remindPayment(unpaid);
+    }
+  }
 
   // Intent detection and booking lookup don't depend on each other, so run them in parallel.
   const [intent, booking] = await Promise.all([
@@ -276,13 +208,13 @@ const processMessage = async ({ message, profileName }) => {
     case 'book':
       return handleBook(from, booking, profileName);
     case 'status':
-      return handleTrack(from, booking);
+      return handleOrderRequest({ from, action: 'track', text });
     case 'cancel':
-      return handleCancel(from, booking);
+      return handleOrderRequest({ from, action: 'cancel', text });
     case 'reschedule':
-      return handleReschedule(from, booking, text);
+      return handleOrderRequest({ from, action: 'reschedule', text });
     case 'confirm':
-      return handleConfirm(from, booking);
+      return handleOrderRequest({ from, action: 'confirm', text });
     default:
       return handleGeneral(from, booking, text, intent);
   }
@@ -315,7 +247,9 @@ const processOnce = async (item) => {
   }
 
   try {
-    await processMessage(item);
+    // One message per customer at a time (all server instances): two quick taps can't
+    // both read the same chat session and overwrite each other's step.
+    await withLock(`wa:${message.from}`, () => processMessage(item));
   } catch (err) {
     console.error(
       `[webhook] Failed to process message ${message.id} from ${maskPhone(message.from)}: ` +
@@ -324,6 +258,12 @@ const processOnce = async (item) => {
     await markEventFailed(message.id, err.message).catch((markErr) =>
       console.error(`[webhook] Could not mark message ${message.id} failed: ${markErr.message}`)
     );
+    // Meta does not resend a message we already answered 200 for, so tell the customer
+    // instead of leaving them without a reply. Best effort (WhatsApp itself may be the failure).
+    if (message.from) {
+      await replyText(message.from, null, 'Sorry, something went wrong on our side. Please send your message again.', 'error')
+        .catch((replyErr) => console.error(`[webhook] Could not send error reply for ${message.id}: ${replyErr.message}`));
+    }
     return;
   }
 
@@ -371,6 +311,10 @@ const handleIncomingMessage = async (req, res) => {
   for (const item of extractMessages(req.body)) {
     await processOnce(item); // never throws
   }
+
+  // WhatsApp Pay results arrive as statuses[type=payment]. Not under the per-customer lock:
+  // payment processing uses its own row locks and is idempotent. Never throws.
+  await handlePaymentStatuses(req.body);
 };
 
 module.exports = {

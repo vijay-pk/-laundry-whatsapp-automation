@@ -41,7 +41,18 @@ const { createNewBooking, updateStatus } = require('./src/controllers/bookingCon
 const { verifyMetaSignature } = require('./src/utils/verifyMetaSignature');
 const { purgeOldEvents } = require('./src/models/webhookEventModel');
 const { purgeExpiredSessions } = require('./src/models/sessionModel');
-const { pool } = require('./src/config/db');
+const { purgeExpiredAdminSessions } = require('./src/models/adminModel');
+const adminRoutes = require('./src/routes/adminRoutes');
+const { payRouter, webhookRouter } = require('./src/routes/payRoutes');
+const razorpay = require('./src/services/razorpayService');
+const { syncPendingWhatsAppPayments } = require('./src/services/whatsappPayService');
+
+if (!razorpay.isConfigured()) {
+  console.warn('[startup] RAZORPAY_KEY_ID/RAZORPAY_KEY_SECRET not set: online payment unavailable (bookings without payment still work)');
+} else if (!process.env.PUBLIC_BASE_URL) {
+  console.warn('[startup] PUBLIC_BASE_URL not set: payment links cannot be sent, online payment unavailable');
+}
+const { closePools } = require('./src/config/db');
 
 const PORT = Number(process.env.PORT) || 3000;
 
@@ -49,6 +60,9 @@ const PORT = Number(process.env.PORT) || 3000;
 // 2. App initialization & global middleware
 // ---------------------------------------------------------------------------
 const app = express();
+
+// Honour X-Forwarded-Proto from a local reverse proxy/tunnel (ngrok) so req.secure is correct.
+app.set('trust proxy', 'loopback');
 
 app.use(cors());
 
@@ -97,6 +111,11 @@ app.post('/webhook', verifyMetaSignature, handleIncomingMessage);
 // Booking API: third-party intake + order status updates
 app.post('/api/bookings', requireApiKey, createNewBooking);
 app.patch('/api/bookings/:id/status', requireApiKey, updateStatus);
+
+// Customer payment page, Razorpay webhook, admin dashboard
+app.use('/pay', payRouter);
+app.use('/webhooks', webhookRouter);
+app.use('/admin', adminRoutes);
 
 // ---------------------------------------------------------------------------
 // 5. 404 handler
@@ -147,6 +166,8 @@ const runPurge = async () => {
     if (removed > 0) console.log(`[jobs] Purged ${removed} old webhook event ids`);
     const sessions = await purgeExpiredSessions();
     if (sessions > 0) console.log(`[jobs] Purged ${sessions} expired chat sessions`);
+    const adminSessions = await purgeExpiredAdminSessions();
+    if (adminSessions > 0) console.log(`[jobs] Purged ${adminSessions} expired admin sessions`);
   } catch (err) {
     console.error(`[jobs] Purge failed: ${err.message}`);
   }
@@ -154,6 +175,16 @@ const runPurge = async () => {
 
 runPurge();
 setInterval(runPurge, PURGE_INTERVAL_MS).unref(); // unref: never keeps the process alive
+
+// WhatsApp Pay: reconcile unpaid payment requests with Meta's lookup API (recovers missed webhooks).
+const WHATSAPP_PAY_SYNC_MS = Number(process.env.WHATSAPP_PAY_SYNC_MINUTES || 5) * 60 * 1000;
+setInterval(async () => {
+  try {
+    await syncPendingWhatsAppPayments();
+  } catch (err) {
+    console.error(`[jobs] WhatsApp Pay sync failed: ${err.message}`);
+  }
+}, WHATSAPP_PAY_SYNC_MS).unref();
 
 // ---------------------------------------------------------------------------
 // 9. Process-level safety nets & graceful shutdown
@@ -170,7 +201,7 @@ process.on('uncaughtException', (err) => {
 const shutdown = (signal) => {
   console.log(`[shutdown] ${signal} received, closing server...`);
   server.close(async () => {
-    await pool.end().catch(() => {}); // release DB connections
+    await closePools().catch(() => {}); // release DB connections (queries + locks)
     console.log('[shutdown] Server and DB pool closed');
     process.exit(0);
   });

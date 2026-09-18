@@ -51,4 +51,70 @@ const query = async (text, params = []) => {
   }
 };
 
-module.exports = { pool, query };
+// ---------------------------------------------------------------------------
+// 4. Transactions
+//    fn receives a client whose query() runs inside BEGIN/COMMIT; any throw rolls back.
+// ---------------------------------------------------------------------------
+const withTransaction = async (fn) => {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const result = await fn(client);
+    await client.query('COMMIT');
+    return result;
+  } catch (err) {
+    await client.query('ROLLBACK').catch(() => {});
+    throw err;
+  } finally {
+    client.release();
+  }
+};
+
+// ---------------------------------------------------------------------------
+// 5. Advisory locks
+//    withLock(key, fn): only one fn per key runs at a time, across every server instance.
+//    The lock lives on a connection from a separate small pool, so waiting lock holders
+//    can never use up the connections fn itself needs for its queries.
+//    Released when fn finishes or throws; if the connection dies, Postgres releases it.
+// ---------------------------------------------------------------------------
+const LOCK_WAIT = process.env.DB_LOCK_TIMEOUT || '60s'; // give up waiting (message retried later)
+
+let lockPool;
+const getLockPool = () => {
+  if (!lockPool) {
+    lockPool = new Pool({
+      connectionString: process.env.DATABASE_URL,
+      max: Number(process.env.DB_LOCK_POOL_MAX) || 5, // customers processed in parallel per instance
+      idleTimeoutMillis: 30000,
+      connectionTimeoutMillis: 60000,
+    });
+    lockPool.on('error', (err) => console.error('[db] Unexpected error on idle lock client:', err.message));
+  }
+  return lockPool;
+};
+
+const withLock = async (key, fn) => {
+  const client = await getLockPool().connect();
+  let broken = null;
+  try {
+    await client.query("SELECT set_config('lock_timeout', $1, false)", [LOCK_WAIT]);
+    await client.query('SELECT pg_advisory_lock(hashtext($1))', [String(key)]);
+  } catch (err) {
+    client.release(err); // discard: lock state unknown
+    throw err;
+  }
+  try {
+    return await fn();
+  } finally {
+    await client.query('SELECT pg_advisory_unlock(hashtext($1))', [String(key)]).catch((err) => {
+      broken = err;
+    });
+    client.release(broken || undefined); // a failed unlock closes the connection, which releases the lock
+  }
+};
+
+const closePools = async () => {
+  await Promise.all([pool.end(), lockPool?.end()]);
+};
+
+module.exports = { pool, query, withTransaction, withLock, closePools };

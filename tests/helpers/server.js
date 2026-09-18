@@ -25,6 +25,16 @@ const TEST_ENV = {
   BUSINESS_LAT: '',
   BUSINESS_LNG: '',
   MAX_DELIVERY_RADIUS_KM: '5',
+  // Never call the real geocoder from tests (port 9 refuses connections immediately)
+  GEOCODER_BASE_URL: 'http://127.0.0.1:9',
+  GEOCODER_MIN_INTERVAL_MS: '0',
+  // Payments off unless a test enables them (never inherit real Razorpay keys from .env)
+  RAZORPAY_KEY_ID: '',
+  RAZORPAY_KEY_SECRET: '',
+  RAZORPAY_WEBHOOK_SECRET: '',
+  RAZORPAY_API_BASE_URL: 'http://127.0.0.1:9',
+  PUBLIC_BASE_URL: '',
+  TEMPLATE_ORDER_STATUS: '',
 };
 
 const getFreePort = () =>
@@ -82,11 +92,13 @@ const startServer = async ({ graphUrl, env = {} }) => {
 
   const baseUrl = `http://localhost:${port}`;
 
-  const request = async (method, pathname, { body, headers = {} } = {}) => {
+  // form: object -> application/x-www-form-urlencoded. Redirects are returned, not followed.
+  const request = async (method, pathname, { body, headers = {}, form } = {}) => {
     const res = await fetch(`${baseUrl}${pathname}`, {
       method,
-      headers: { 'Content-Type': 'application/json', ...headers },
-      body,
+      headers: { 'Content-Type': form ? 'application/x-www-form-urlencoded' : 'application/json', ...headers },
+      body: form ? new URLSearchParams(form).toString() : body,
+      redirect: 'manual',
     });
     const text = await res.text();
     let json = null;
@@ -95,7 +107,7 @@ const startServer = async ({ graphUrl, env = {} }) => {
     } catch {
       /* not JSON */
     }
-    return { status: res.status, text, json };
+    return { status: res.status, text, json, headers: res.headers };
   };
 
   const sign = (raw) =>

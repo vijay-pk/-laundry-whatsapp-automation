@@ -5,6 +5,7 @@
 
 const { describe, it, before, after } = require('node:test');
 const assert = require('node:assert/strict');
+const http = require('node:http');
 
 const { query, resetDb, createBusiness, closeDb } = require('../helpers/db');
 const { startMockGraph } = require('../helpers/mockGraph');
@@ -49,10 +50,25 @@ describe('Geofenced pickup validation', () => {
   const bookingsFor = async (phone) =>
     (await query('SELECT * FROM bookings WHERE client_phone = $1 ORDER BY created_at', [phone])).rows;
 
+  // Mock geocoder (Nominatim API shape): place name -> result
+  let geocoder;
+  const geocodeResults = new Map();
+  const startGeocoder = () =>
+    new Promise((resolve) => {
+      geocoder = http.createServer((req, res) => {
+        const q = new URL(req.url, 'http://x').searchParams.get('q') || '';
+        const hit = [...geocodeResults.entries()].find(([key]) => q.startsWith(key));
+        res.setHeader('Content-Type', 'application/json');
+        res.end(JSON.stringify(hit ? [hit[1]] : []));
+      });
+      geocoder.listen(0, () => resolve(`http://127.0.0.1:${geocoder.address().port}`));
+    });
+
   before(async () => {
     await resetDb();
     business = await createBusiness();
     graph = await startMockGraph();
+    const geocoderUrl = await startGeocoder();
     server = await startServer({
       graphUrl: graph.url,
       env: {
@@ -60,11 +76,13 @@ describe('Geofenced pickup validation', () => {
         BUSINESS_LAT: String(STORE.lat),
         BUSINESS_LNG: String(STORE.lng),
         MAX_DELIVERY_RADIUS_KM: '5',
+        GEOCODER_BASE_URL: geocoderUrl,
       },
     });
   });
 
   after(async () => {
+    await new Promise((resolve) => (geocoder ? geocoder.close(resolve) : resolve()));
     await server?.stop();
     await graph?.close();
     await closeDb();
@@ -149,6 +167,80 @@ describe('Geofenced pickup validation', () => {
       notice.includes(`https://www.google.com/maps/search/?api=1&query=${NEAR.latitude},${NEAR.longitude}`),
       notice
     );
+  });
+
+  describe('Google Maps links', () => {
+    const startBooking = async (phone, name) => {
+      await text(phone, 'book', { profileName: name });
+      await pick(phone, 'svc_wash_fold');
+    };
+
+    it('accepts a pasted link that contains coordinates (exact) and shares it with the admin', async () => {
+      const phone = '919700000010';
+      await startBooking(phone, 'Link Exact');
+      const link = `https://www.google.com/maps/search/${NEAR.latitude},+${NEAR.longitude}?entry=tts`;
+
+      const [slots] = await text(phone, `here is my place ${link}`, { profileName: 'Link Exact' });
+      assert.equal(slots.interactive.type, 'list');
+
+      await pick(phone, slots.interactive.action.sections[0].rows[0].id);
+      await text(phone, 'Flat 2A, Lake View Apartments', { profileName: 'Link Exact' });
+      await tap(phone, 'notes_skip');
+      const adminBefore = graph.sentTo(TEST_ENV.ADMIN_PHONE).length;
+      await tap(phone, 'confirm_yes');
+
+      const [booking] = await bookingsFor(phone);
+      assert.equal(Number(booking.latitude), NEAR.latitude);
+      assert.equal(booking.booking_state, 'confirmed');
+
+      const notice = graph.sentTo(TEST_ENV.ADMIN_PHONE).slice(adminBefore).map((r) => r.body).find((b) => b.type === 'text').text.body;
+      assert.ok(notice.includes(`Customer's link: ${link}`), notice);
+      assert.doesNotMatch(notice, /approximate/);
+    });
+
+    it('rejects a pasted link far outside the radius', async () => {
+      const phone = '919700000011';
+      await startBooking(phone, 'Link Far');
+      const [reply] = await text(phone, `https://maps.google.com/?q=${FAR.latitude},${FAR.longitude}`);
+      assert.equal(reply.text.body, REJECTION);
+      assert.equal((await bookingsFor(phone))[0].booking_state, 'rejected');
+    });
+
+    it('geocodes a place link without coordinates and accepts it when clearly inside', async () => {
+      const phone = '919700000012';
+      geocodeResults.set('Papaiah Road', { lat: '12.9800', lon: '77.6000', addresstype: 'road', display_name: 'Papaiah Road, Kammanahalli' });
+      await startBooking(phone, 'Place Near');
+
+      const [slots] = await text(phone, 'https://www.google.com/maps/place/Olive+Cafe,+Papaiah+Road,+Kammanahalli,+Bengaluru,+Karnataka+560084/data=!4m2');
+      assert.equal(slots.interactive.type, 'list', 'accepted (~1 km, street-level)');
+
+      const session = (await query('SELECT data FROM conversation_sessions WHERE client_phone = $1', [phone])).rows[0];
+      assert.equal(session.data.geo.precision, 'approximate');
+    });
+
+    it('asks for the exact location when an approximate place is near the edge of the radius', async () => {
+      const phone = '919700000013';
+      // ~4.5 km north of the store, area-level (±2 km): could be inside or outside
+      geocodeResults.set('Edge Area', { lat: '13.0121', lon: '77.5946', addresstype: 'suburb', display_name: 'Edge Area' });
+      await startBooking(phone, 'Place Edge');
+
+      const [reply] = await text(phone, 'https://maps.google.com/?q=Edge+Area,+Bengaluru,+Karnataka');
+      assert.match(reply.text.body, /near the edge of our 5km service radius/);
+      assert.equal((await sessionFor(phone)).step, 'location', 'still waiting for a location');
+      assert.equal((await bookingsFor(phone)).length, 0, 'not rejected');
+    });
+
+    it("explains when a link can't be read", async () => {
+      const phone = '919700000014';
+      await startBooking(phone, 'Place Unknown');
+      const [reply] = await text(phone, 'https://www.google.com/maps/place/Nowhere+Special,+Unknown+Street,+Atlantis/data=!4m2');
+      assert.match(reply.text.body, /couldn't read a location from that link/);
+    });
+
+    it('guides the customer when a link is sent outside a booking', async () => {
+      const [reply] = await text('919700000015', `https://maps.google.com/?q=${NEAR.latitude},${NEAR.longitude}`);
+      assert.match(reply.text.body, /To book a pickup, send \*book\*/);
+    });
   });
 
   it('replies with guidance when a location is shared outside a booking', async () => {

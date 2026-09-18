@@ -141,7 +141,7 @@ describe('POST /api/bookings', () => {
 
       const sent = graph.sentTo('919600000001');
       assert.equal(sent.length, 1);
-      assert.equal(sent[0].body.text.body, 'Our driver is on the way to pick up your clothes.');
+      assert.equal(sent[0].body.text.body, `Order #${bookingId.slice(0, 8).toUpperCase()}: Our driver is on the way to pick up your clothes.`);
 
       const { rows } = await query(
         `SELECT intent FROM messages WHERE client_phone = '919600000001' AND direction = 'outbound'`
