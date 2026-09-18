@@ -17,6 +17,10 @@ const businessKnowledge = {
   hours: '[EDIT] Mon-Sat 8:00 AM - 8:00 PM, Sunday closed',
   serviceArea: '[EDIT] Areas/pincodes where pickup and delivery are available',
   contactPhone: '[EDIT] +91 00000 00000',
+  // Public website (npm run site:build) + privacy policy contact.
+  whatsappNumber: '[EDIT] 910000000000', // business WhatsApp number: digits only, with country code
+  email: '[EDIT] hello@example.com',
+  address: '[EDIT] Shop address, City, PIN',
 
   // Shown as the booking menu. `id` must stay stable (stored in chat sessions);
   // `name` max 24 characters (WhatsApp list row limit).
